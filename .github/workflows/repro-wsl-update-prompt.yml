@@ -74,6 +74,14 @@ jobs:
               }
             }
 
+            # capture the launcher: command line + parent process of any live wsl process
+            foreach ($pname in @('wsl.exe','wslhost.exe','wslservice.exe','LxRun.exe')) {
+              Get-CimInstance Win32_Process -Filter "Name='$pname'" -ErrorAction SilentlyContinue | ForEach-Object {
+                $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ParentProcessId)" -ErrorAction SilentlyContinue
+                "  PROC $pname pid=$($_.ProcessId) cmd=[$($_.CommandLine)] parent=$($par.Name)#$($_.ParentProcessId) parentcmd=[$($par.CommandLine)]" | Tee-Object -FilePath $log -Append
+              }
+            }
+
             # screenshot every ~15s
             if ($i % 3 -eq 0) {
               try {
@@ -152,6 +160,21 @@ jobs:
             "== Startup: $sf ==" | Tee-Object -FilePath $file -Append
             Get-ChildItem -Path $sf -ErrorAction SilentlyContinue | ForEach-Object { "  $($_.Name)" | Tee-Object -FilePath $file -Append }
           }
+          # Active Setup - runs StubPath commands on first interactive logon (not a Run key)
+          "== Active Setup StubPath entries referencing wsl ==" | Tee-Object -FilePath $file -Append
+          foreach ($as in @('HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components',
+                            'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Active Setup\Installed Components')) {
+            Get-ChildItem $as -ErrorAction SilentlyContinue | ForEach-Object {
+              $sp = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).StubPath
+              if ($sp -match 'wsl|lxss|subsystem') { "  $($_.PSChildName) -> $sp" | Tee-Object -FilePath $file -Append }
+            }
+          }
+          # Winlogon Userinit / Shell + GPO logon scripts
+          "== Winlogon ==" | Tee-Object -FilePath $file -Append
+          (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue |
+            Select-Object Userinit,Shell,AutoAdminLogon | Format-List | Out-String) | Tee-Object -FilePath $file -Append
+          "== GPO logon scripts ==" | Tee-Object -FilePath $file -Append
+          (reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup" /s 2>&1 | Select-String -Pattern 'wsl' -SimpleMatch) | Tee-Object -FilePath $file -Append
           Get-Content $file
 
       - name: WSL status / version / update policy
