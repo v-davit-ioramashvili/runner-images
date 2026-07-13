@@ -27,7 +27,9 @@ jobs:
       # ---------------------------------------------------------------
       - name: Watch foreground window and screenshot
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = 'SilentlyContinue'
           # Build the P/Invoke type from a joined array so there is no column-0
           # here-string terminator (which would break the YAML block scalar).
           $cs = @(
@@ -97,7 +99,9 @@ jobs:
       - name: Scheduled tasks referencing wsl / update
         shell: pwsh
         if: always()
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = 'SilentlyContinue'
           $out = "$env:GITHUB_WORKSPACE\artifacts"; New-Item -ItemType Directory -Force -Path $out | Out-Null
           $file = "$out\scheduled-tasks.txt"
           Get-ScheduledTask | ForEach-Object {
@@ -117,7 +121,9 @@ jobs:
       - name: Run / RunOnce keys (machine, user, default hive) + Startup folders
         shell: pwsh
         if: always()
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = 'SilentlyContinue'
           $out = "$env:GITHUB_WORKSPACE\artifacts"
           $file = "$out\autostart.txt"
           $keys = @(
@@ -151,7 +157,9 @@ jobs:
       - name: WSL status / version / update policy
         shell: pwsh
         if: always()
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = 'SilentlyContinue'
           $out = "$env:GITHUB_WORKSPACE\artifacts"
           $file = "$out\wsl-status.txt"
           "wsl.exe --version:" | Tee-Object -FilePath $file -Append
