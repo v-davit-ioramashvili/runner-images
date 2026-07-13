@@ -23,6 +23,35 @@ jobs:
     timeout-minutes: 15
     steps:
       # ---------------------------------------------------------------
+      # 0) FAST-CAPTURE the launcher: poll every 0.3s so we resolve the
+      #    parent/grandparent of wsl.exe BEFORE the transient launcher exits.
+      # ---------------------------------------------------------------
+      - name: Fast-capture wsl.exe launcher (parent + grandparent)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $out = "$env:GITHUB_WORKSPACE\artifacts"; New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $file = "$out\launcher.txt"
+          $seen = @{}
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline) {
+            foreach ($p in (Get-CimInstance Win32_Process -Filter "Name='wsl.exe'")) {
+              if (-not $seen.ContainsKey($p.ProcessId)) {
+                $seen[$p.ProcessId] = $true
+                $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)"
+                $gp  = if ($par) { Get-CimInstance Win32_Process -Filter "ProcessId=$($par.ParentProcessId)" } else { $null }
+                "[{0:HH:mm:ss.fff}] wsl pid=$($p.ProcessId) cmd=[$($p.CommandLine)]" -f (Get-Date) | Tee-Object -FilePath $file -Append
+                "    parent=$($par.Name)#$($p.ParentProcessId) parentcmd=[$($par.CommandLine)]" | Tee-Object -FilePath $file -Append
+                "    grandparent=$($gp.Name)#$($par.ParentProcessId) gpcmd=[$($gp.CommandLine)]" | Tee-Object -FilePath $file -Append
+              }
+            }
+            Start-Sleep -Milliseconds 300
+          }
+          if (-not (Test-Path $file)) { "no wsl.exe observed in 90s window" | Out-File $file }
+          Get-Content $file
+
+      # ---------------------------------------------------------------
       # 1) OBSERVE: watch foreground window + screenshot for ~150s
       # ---------------------------------------------------------------
       - name: Watch foreground window and screenshot
@@ -193,6 +222,26 @@ jobs:
           (reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WSL" 2>&1) | Tee-Object -FilePath $file -Append
           "`nWSL appx package:" | Tee-Object -FilePath $file -Append
           (Get-AppxPackage -AllUsers *WindowsSubsystemForLinux* 2>&1 | Format-List Name,Version,PackageFullName | Out-String) | Tee-Object -FilePath $file -Append
+          Get-Content $file
+
+      - name: Event logs + full scheduled-task list (authoritative launcher check)
+        shell: pwsh
+        if: always()
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $out = "$env:GITHUB_WORKSPACE\artifacts"
+          $file = "$out\eventlogs.txt"
+          "== TaskScheduler/Operational events mentioning wsl ==" | Tee-Object -FilePath $file -Append
+          Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 400 |
+            Where-Object { $_.Message -match 'wsl' } |
+            ForEach-Object { ("{0} [{1}] {2}" -f $_.TimeCreated,$_.Id,($_.Message -replace "`r?`n",' ')) | Tee-Object -FilePath $file -Append }
+          "== Application/System events mentioning wsl --update (last 200) ==" | Tee-Object -FilePath $file -Append
+          Get-WinEvent -FilterHashtable @{ LogName='Application','System' } -MaxEvents 200 |
+            Where-Object { $_.Message -match 'wsl' } |
+            ForEach-Object { ("{0} [{1}/{2}] {3}" -f $_.TimeCreated,$_.ProviderName,$_.Id,($_.Message -replace "`r?`n",' ')) | Tee-Object -FilePath $file -Append }
+          "== FULL scheduled-task list (eyeball for anything wsl/lxss/update) ==" | Tee-Object -FilePath $file -Append
+          Get-ScheduledTask | ForEach-Object { "$($_.TaskPath)$($_.TaskName) [$($_.State)]" | Tee-Object -FilePath $file -Append }
           Get-Content $file
 
       - name: Upload evidence
