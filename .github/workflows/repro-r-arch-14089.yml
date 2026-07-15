@@ -128,10 +128,33 @@ jobs:
 
           Write-Host ''
           Write-Host '=== 5) how was R installed? (choco package + arch) ==='
+          # NB: --local-only was removed in Chocolatey v2; `choco list` is local by default.
+          # Open question this answers: does R.Project even OFFER an arm64 variant that
+          # Install-R.ps1 could ask for, or is x86_64 the only thing the package ships?
           $choco = Get-Command choco -ErrorAction SilentlyContinue
           if ($choco) {
-            & choco list --local-only --exact R.Project 2>&1 | Out-String | Write-Host
-            & choco list --local-only --exact rtools 2>&1 | Out-String | Write-Host
+            Write-Host '--- installed packages ---'
+            & choco list --exact R.Project 2>&1 | Out-String | Write-Host
+            & choco list --exact rtools 2>&1 | Out-String | Write-Host
+            Write-Host '--- what the R.Project package actually fetched (install log) ---'
+            $log = 'C:\ProgramData\chocolatey\logs\chocolatey.log'
+            if (Test-Path $log) {
+              Select-String -Path $log -Pattern 'R\.Project|R-\d+\.\d+\.\d+-win|aarch64|arm64|R-win' -ErrorAction SilentlyContinue |
+                Select-Object -First 25 | ForEach-Object { Write-Host $_.Line.Trim() }
+            } else {
+              Write-Host "no chocolatey.log at $log"
+            }
+            Write-Host '--- does the package ship an arm64 URL at all? ---'
+            $tools = 'C:\ProgramData\chocolatey\lib\R.Project\tools'
+            if (Test-Path $tools) {
+              Get-ChildItem $tools -Filter '*.ps1' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "  [$($_.Name)]"
+                Select-String -Path $_.FullName -Pattern 'url|aarch64|arm64|checksum' -ErrorAction SilentlyContinue |
+                  Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
+              }
+            } else {
+              Write-Host "package tools dir not present ($tools)"
+            }
           } else {
             Write-Host 'choco not available'
           }
