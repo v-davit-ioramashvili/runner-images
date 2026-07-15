@@ -1,0 +1,139 @@
+name: Repro R arch on windows-11-arm - issue 14089
+
+# Run manually from the Actions tab. Verifies / disproves the report in
+# https://github.com/actions/runner-images/issues/14089 :
+# `Rscript -e 'print(R.version)'` on windows-11-arm reports arch = x86_64
+# instead of aarch64.
+#
+# The reporter reads this as R misreporting its architecture. The competing
+# hypothesis is that R is reporting correctly and we simply ship the x86_64
+# build, which then runs under Windows-on-ARM emulation. Those two produce
+# IDENTICAL `R.version` output, so the reporter's evidence cannot distinguish
+# them. This workflow settles it by going underneath R:
+#
+#   1) CONFIRM  - reproduce the reported R.version output verbatim.
+#   2) PROOF    - read the PE header machine field of the actual Rscript.exe /
+#                 R.dll on disk. 0x8664 = compiled for x64, 0xAA64 = compiled
+#                 for ARM64. A binary cannot lie about this the way a string
+#                 variable can. If it reads x64, R is reporting the truth and
+#                 the issue is our install choice, not an R bug.
+#   3) LOCATION - which R does PATH resolve, and is it under
+#                 "Program Files (x86)" (emulated) as Install-R.ps1 assumes?
+#   4) NATIVE   - is a native aarch64 R present anywhere on the image?
+#   5) CONTROL  - same probe on windows-latest (x64) to show the PE machine
+#                 field tracks the image, i.e. that step 2 measures anything.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-11-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Probe R architecture
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          # Reads the COFF machine field from a PE file. This is what the binary
+          # was COMPILED for, independent of what any runtime reports.
+          function Get-PEMachine([string]$Path) {
+            try {
+              $fs = [System.IO.File]::OpenRead($Path)
+              try {
+                $br = New-Object System.IO.BinaryReader($fs)
+                $fs.Position = 0x3C
+                $peOffset = $br.ReadInt32()
+                $fs.Position = $peOffset
+                if ($br.ReadUInt32() -ne 0x00004550) { return 'not a PE file' }
+                $machine = $br.ReadUInt16()
+                switch ($machine) {
+                  0x8664  { 'x64 / AMD64  (0x8664)' }
+                  0xAA64  { 'ARM64 native (0xAA64)' }
+                  0xA641  { 'ARM64EC      (0xA641)' }
+                  0x01C4  { 'ARMv7        (0x01C4)' }
+                  0x014C  { 'x86          (0x014C)' }
+                  default { 'unknown 0x{0:X4}' -f $machine }
+                }
+              } finally { $fs.Dispose() }
+            } catch { "<error: $_>" }
+          }
+
+          Write-Host '=== environment ==='
+          Write-Host "label            : $env:MATRIX_OS"
+          Write-Host "ImageVersion     : $env:ImageVersion"
+          Write-Host "PROCESSOR_ARCH   : $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "PROC_IDENTIFIER  : $env:PROCESSOR_IDENTIFIER"
+          Write-Host "OS arch (CIM)    : $((Get-CimInstance Win32_OperatingSystem).OSArchitecture)"
+          Write-Host "pwsh arch        : $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          Write-Host "OS arch (.NET)   : $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+
+          Write-Host ''
+          Write-Host '=== 1) CONFIRM: the reported symptom ==='
+          $rs = Get-Command Rscript -ErrorAction SilentlyContinue
+          if (-not $rs) {
+            Write-Host 'Rscript NOT on PATH'
+          } else {
+            Write-Host "Rscript resolves : $($rs.Source)"
+            Write-Host '--- Rscript --version ---'
+            & Rscript --version 2>&1 | Out-String | Write-Host
+            Write-Host '--- Rscript -e "print(R.version)" (the reporter''s exact command) ---'
+            & Rscript -e 'print(R.version)' 2>&1 | Out-String | Write-Host
+            Write-Host '--- the two fields the issue is about ---'
+            & Rscript -e 'cat("arch    :", R.version$arch, "\n"); cat("platform:", R.version$platform, "\n"); cat("os      :", R.version$os, "\n")' 2>&1 | Out-String | Write-Host
+          }
+
+          Write-Host ''
+          Write-Host '=== 2) PROOF: what arch is the R binary actually compiled for? ==='
+          Write-Host 'If these read x64 on windows-11-arm, R.version is TRUTHFUL and'
+          Write-Host 'the image ships the emulated x86_64 build. That is the whole question.'
+          if ($rs) {
+            Write-Host ("{0,-14} : {1}" -f 'Rscript.exe', (Get-PEMachine $rs.Source))
+            $rroot = Split-Path (Split-Path $rs.Source -Parent) -Parent
+            foreach ($bin in @('R.exe', 'R.dll', 'Rblas.dll')) {
+              $hit = Get-ChildItem -Path $rroot -Filter $bin -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($hit) { Write-Host ("{0,-14} : {1}" -f $bin, (Get-PEMachine $hit.FullName)) }
+            }
+          }
+          # pwsh itself, as a sanity check that Get-PEMachine reports sensibly.
+          Write-Host ("{0,-14} : {1}" -f 'pwsh.exe (ref)', (Get-PEMachine (Get-Process -Id $PID).Path))
+
+          Write-Host ''
+          Write-Host '=== 3) LOCATION: where did R get installed? ==='
+          Write-Host 'Install-R.ps1 expects "C:\Program Files (x86)\R\*\bin\x64" on ARM64.'
+          Write-Host 'On Windows-on-ARM, emulated x64 apps land in "Program Files (x86)";'
+          Write-Host 'native ARM64 apps land in "Program Files". So the directory itself is a tell.'
+          foreach ($p in @('C:\Program Files\R', 'C:\Program Files (x86)\R', 'C:\Program Files\R-aarch64')) {
+            if (Test-Path $p) {
+              Write-Host "PRESENT : $p"
+              Get-ChildItem $p -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "          -> $($_.Name)" }
+            } else {
+              Write-Host "absent  : $p"
+            }
+          }
+
+          Write-Host ''
+          Write-Host '=== 4) NATIVE: is a native aarch64 R present at all? ==='
+          Write-Host 'Native build has no \x64 path segment and uses an aarch64-library folder.'
+          $native = Get-ChildItem 'C:\Program Files' -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match 'R-aarch64|R-arm' }
+          if ($native) { $native | ForEach-Object { Write-Host "found: $($_.FullName)" } }
+          else { Write-Host 'no native aarch64 R installed on this image' }
+
+          Write-Host ''
+          Write-Host '=== 5) how was R installed? (choco package + arch) ==='
+          $choco = Get-Command choco -ErrorAction SilentlyContinue
+          if ($choco) {
+            & choco list --local-only --exact R.Project 2>&1 | Out-String | Write-Host
+            & choco list --local-only --exact rtools 2>&1 | Out-String | Write-Host
+          } else {
+            Write-Host 'choco not available'
+          }
+        env:
+          MATRIX_OS: ${{ matrix.os }}
