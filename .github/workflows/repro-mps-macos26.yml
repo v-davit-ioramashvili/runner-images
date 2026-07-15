@@ -1,0 +1,112 @@
+name: Repro MPS availability/outputs (macos-15 vs macos-26) - issue 14380
+
+# Run manually from the Actions tab. Reproduces / disproves the report in
+# https://github.com/actions/runner-images/issues/14380 :
+# PyTorch tests that select the `mps` backend pass on macos-15 but produce
+# different numeric outputs on macos-26 (both arm64).
+#
+# The reporter used the `macos-latest` label, which migrated from macos-15 to
+# macos-26 during the June 15 - July 15 2026 rollout (issue #14167), so their
+# "pass" and "fail" runs are not a controlled comparison. This workflow pins
+# both labels explicitly and answers the three questions that matter:
+#
+#   1) AVAILABLE - does torch.backends.mps.is_available() differ between the images?
+#   2) USABLE    - does an actual MPS allocation + matmul succeed, or raise the
+#                  "MPS backend out of memory" error reported in issue #9918?
+#   3) NUMERICS  - do CPU and MPS produce bit-identical results, and does the MPS
+#                  result differ between macos-15 and macos-26?
+#
+# Question 3 is the reporter's actual complaint: their baselines are CPU-derived
+# but the `mps` parametrization asserts against them exactly.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 and macos-26 are both arm64; macos-latest is included to show
+        # which image the label currently resolves to.
+        os: [macos-15, macos-26, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install torch
+        run: python -m pip install --quiet torch numpy
+
+      - name: Probe MPS (availability, usability, numerics)
+        run: |
+          cat > probe.py <<'PY'
+          import os, platform, subprocess
+          import torch
+
+          def sh(cmd):
+              try:
+                  r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90)
+                  return r.stdout.strip()
+              except Exception as e:
+                  return f"<error: {e}>"
+
+          print("=== environment ===")
+          print("label/image :", os.environ.get("MATRIX_OS"))
+          print("ImageVersion:", os.environ.get("ImageVersion"))
+          print("macOS       :", sh("sw_vers -productVersion"), sh("sw_vers -buildVersion"))
+          print("arch        :", platform.machine())
+          print("torch       :", torch.__version__)
+
+          print("=== 1) availability ===")
+          built = torch.backends.mps.is_built()
+          avail = torch.backends.mps.is_available()
+          print("mps.is_built    :", built)
+          print("mps.is_available:", avail)
+
+          print("=== GPU as seen by the VM ===")
+          print(sh("system_profiler SPDisplaysDataType"))
+
+          print("=== 2) usability (issue #9918 OOM check) ===")
+          if avail:
+              try:
+                  t = torch.ones(1024, 1024, device="mps")
+                  val = (t @ t).sum().item()
+                  print("alloc + matmul  : OK (checksum", val, ")")
+              except Exception as e:
+                  print("alloc + matmul  : FAILED", type(e).__name__, e)
+          else:
+              print("alloc + matmul  : skipped (mps unavailable)")
+
+          print("=== 3) numerics: CPU vs MPS ===")
+          if avail:
+              torch.manual_seed(0)
+              a, b = torch.randn(256, 256), torch.randn(256, 256)
+              cpu = a @ b
+              mps = (a.to("mps") @ b.to("mps")).cpu()
+              print("matmul bit-identical:", torch.equal(cpu, mps))
+              print("matmul max abs diff :", (cpu - mps).abs().max().item())
+
+              # conv2d is what SAM2's image encoder leans on
+              torch.manual_seed(0)
+              x, w = torch.randn(1, 3, 64, 64), torch.randn(8, 3, 3, 3)
+              c_cpu = torch.nn.functional.conv2d(x, w)
+              c_mps = torch.nn.functional.conv2d(x.to("mps"), w.to("mps")).cpu()
+              print("conv2d bit-identical:", torch.equal(c_cpu, c_mps))
+              print("conv2d max abs diff :", (c_cpu - c_mps).abs().max().item())
+
+              # Fixed-input fingerprint: compare this value ACROSS the two images.
+              # If macos-15 and macos-26 print different fingerprints, the MPS
+              # kernels themselves changed with the OS.
+              torch.manual_seed(42)
+              f = torch.randn(512, 512).to("mps")
+              print("MPS fingerprint     : %.12f" % (f @ f).sum().item())
+          else:
+              print("skipped (mps unavailable)")
+          PY
+          python probe.py
+        env:
+          MATRIX_OS: ${{ matrix.os }}
