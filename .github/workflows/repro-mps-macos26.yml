@@ -115,20 +115,33 @@ jobs:
     # Runs the reporter's actual SAM2 workload (not just matmul/conv2d) so we can
     # compare the ops SAM2 really uses across the two images.
     #
-    # The first run of this job found a real split: on macos-15 CPU and MPS agree
-    # exactly, but on macos-26 the MPS run dies with
+    # Established so far: on macos-15 CPU and MPS agree exactly (3 masks / area 9905
+    # / iou 0.985302). On macos-26 CPU gives the same 3 masks but MPS finds ZERO, then
+    # dies downstream in torchvision box_area with
     #   IndexError: index 2 is out of bounds for dimension 1 with size 0
-    # i.e. some op returns an EMPTY tensor on macOS 26 where it returns results on
-    # macOS 15. This job now also:
-    #   - prints a full traceback, to name the op that produces the empty tensor;
-    #   - repeats each device 3x, to tell a hard failure from a flake;
-    #   - matrices over torch 2.12.1 (the reporter's version) and 2.13.0, to see
-    #     whether a newer torch already fixes it (that would be the workaround).
+    # Deterministic (3/3), on both torch 2.12.1 and 2.13.0 — so a newer torch is not
+    # the fix. Each device is run 3x with a full traceback to keep proving that.
+    #
+    # Open question this matrix answers: is there ANY torch that works on macos-26?
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
-        torch: ["2.12.1", "2.13.0"]
+        include:
+          # Baseline: the reporter's version (2.12.1) and current (2.13.0) on both
+          # images. Known so far: macos-15 + 2.12.1 works; macos-26 fails on both.
+          - { os: macos-15, torch: "2.12.1" }
+          - { os: macos-15, torch: "2.13.0" }
+          - { os: macos-26, torch: "2.12.1" }
+          - { os: macos-26, torch: "2.13.0" }
+          # Sweep older torch on macos-26 only: is there ANY working version there?
+          # 2.8.0 predates macOS 26; 2.9.1 is the first stable released after it.
+          # If one of these passes, this is a PyTorch regression with a bisectable
+          # window (actionable upstream). If all fail, the problem is macOS 26 /
+          # Metal itself and no torch version helps.
+          - { os: macos-26, torch: "2.8.0" }
+          - { os: macos-26, torch: "2.9.1" }
+          - { os: macos-26, torch: "2.10.0" }
+          - { os: macos-26, torch: "2.11.0" }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
