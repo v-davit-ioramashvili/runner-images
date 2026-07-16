@@ -110,3 +110,71 @@ jobs:
           python probe.py
         env:
           MATRIX_OS: ${{ matrix.os }}
+
+  sam2:
+    # Runs the reporter's actual SAM2 workload (not just matmul/conv2d) so we can
+    # compare the ops SAM2 really uses across the two images. Pinned to torch 2.12.1
+    # to match the version the reporter's linked runs installed.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install SAM2 stack (torch pinned to 2.12.1)
+        run: |
+          python -m pip install --quiet "torch==2.12.1" torchvision numpy opencv-python-headless huggingface_hub
+          python -m pip install --quiet "git+https://github.com/facebookresearch/sam2@2b90b9f5ceec907a1c18123530e92e794ad901a4"
+
+      - name: Run SAM2 mask generation on CPU and MPS
+        run: |
+          cat > sam2_probe.py <<'PY'
+          import os
+          import numpy as np
+          import cv2
+          import torch
+          from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+
+          mask_settings = {
+              "points_per_side": 4, "points_per_batch": 4,
+              "pred_iou_thresh": 0.80, "stability_score_thresh": 0.80,
+              "stability_score_offset": 0.1, "crop_n_layers": 1,
+              "box_nms_thresh": 0.1, "crop_n_points_downscale_factor": 1,
+              "min_mask_region_area": 5, "use_m2m": True,
+          }
+
+          # Same fixed input the reporter's snippet uses: two white circles.
+          img = np.zeros((100, 100, 3), np.uint8)
+          white, filled = (255, 255, 255), -1
+          cv2.circle(img, (30, 30), 10, white, filled)
+          cv2.circle(img, (70, 65), 15, white, filled)
+
+          print("image:", os.environ.get("MATRIX_OS"), "| torch:", torch.__version__,
+                "| mps.is_available:", torch.backends.mps.is_available())
+
+          def run(device):
+              model = SAM2AutomaticMaskGenerator.from_pretrained(
+                  "facebook/sam2.1-hiera-tiny", device=device,
+                  apply_postprocessing=False, **mask_settings,
+              )
+              masks = model.generate(img)
+              n = len(masks)
+              area = int(np.sum([m["area"] for m in masks])) if n else 0
+              iou = float(np.mean([m["predicted_iou"] for m in masks])) if n else float("nan")
+              print(f"  device={device:3s}  num_masks={n:3d}  total_area={area:6d}  mean_iou={iou:.6f}")
+
+          for dev in ["cpu"] + (["mps"] if torch.backends.mps.is_available() else []):
+              try:
+                  run(dev)
+              except Exception as e:
+                  print(f"  device={dev:3s}  FAILED {type(e).__name__}: {e}")
+          PY
+          python sam2_probe.py
+        env:
+          MATRIX_OS: ${{ matrix.os }}
