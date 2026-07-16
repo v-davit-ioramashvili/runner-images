@@ -160,3 +160,93 @@ jobs:
           }
         env:
           MATRIX_OS: ${{ matrix.os }}
+
+  # ---------------------------------------------------------------------------
+  # Rehearsal of the workaround we intend to hand the reporter. This is NOT
+  # diagnosis - the `probe` job above already settled the issue. This job runs
+  # the snippet verbatim, as a user copy-pasting it would, to check that:
+  #   - the staging URL and silent-install flags actually work unattended
+  #   - the install path we tell them to expect is the real one
+  #   - native R reports aarch64 (i.e. the workaround does what we claim)
+  #   - it coexists with the preinstalled emulated R rather than breaking it
+  # The install-path guess comes from upstream docs, not from a run - so the
+  # snippet throws on a wrong path, and the failure handler below prints the
+  # real layout so a wrong guess is self-correcting in one run.
+  native-install:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    steps:
+      - name: Baseline - preinstalled R, before we touch anything
+        shell: pwsh
+        run: |
+          Write-Host "Rscript resolves : $((Get-Command Rscript -ErrorAction SilentlyContinue).Source)"
+          & Rscript -e 'cat("arch:", R.version$arch, "|", R.version$version.string, "\n")' 2>&1 | Write-Host
+
+      # --- everything in this step is the snippet exactly as drafted ---
+      - name: Install native aarch64 R
+        shell: pwsh
+        run: |
+          $rVersion = '4.5.3'
+          $url = "https://www.r-project.org/nosvn/winutf8/aarch64/R-4/R-$rVersion-aarch64.exe"
+          $exe = "$env:RUNNER_TEMP\R-aarch64.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          Start-Process $exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait
+
+          $rBin = "C:\Program Files\R-aarch64\R-$rVersion\bin"
+          if (-not (Test-Path $rBin)) { throw "R not found at $rBin" }
+
+          # prepend so native R takes precedence over the preinstalled x86_64 R
+          $rBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Verify
+        shell: pwsh
+        run: Rscript -e 'cat(R.version$arch, R.version$version.string, sep="  ")'
+      # --- end of snippet ---
+
+      - name: If the install path was wrong, show where it actually landed
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host 'Snippet threw. Actual layout under Program Files:'
+          Get-ChildItem 'C:\Program Files' -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^R' } | ForEach-Object {
+              Write-Host "  $($_.FullName)"
+              Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "    -> $($_.Name)" }
+            }
+          Write-Host 'Any Rscript.exe on disk:'
+          Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Filter Rscript.exe -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.FullName)" }
+
+      - name: Confirm it is really ARM64, and that emulated R still works
+        shell: pwsh
+        run: |
+          function Get-PEMachine([string]$Path) {
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $fs.Position = 0x3C; $peOffset = $br.ReadInt32(); $fs.Position = $peOffset
+              if ($br.ReadUInt32() -ne 0x00004550) { return 'not a PE file' }
+              switch ($br.ReadUInt16()) {
+                0x8664 { 'x64 / AMD64  (0x8664)' } 0xAA64 { 'ARM64 native (0xAA64)' }
+                default { 'other' }
+              }
+            } finally { $fs.Dispose() }
+          }
+
+          $native = 'C:\Program Files\R-aarch64\R-4.5.3\bin\Rscript.exe'
+          $emul   = 'C:\Program Files (x86)\R\R-4.6.1\bin\x64\Rscript.exe'
+
+          Write-Host '=== the point of the whole exercise ==='
+          Write-Host "PATH now resolves Rscript to : $((Get-Command Rscript).Source)"
+          if (Test-Path $native) { Write-Host "native Rscript.exe  : $(Get-PEMachine $native)" }
+
+          Write-Host ''
+          Write-Host '=== coexistence: preinstalled emulated R must still work ==='
+          if (Test-Path $emul) {
+            Write-Host "emulated Rscript.exe: $(Get-PEMachine $emul)"
+            & $emul -e 'cat("emulated R still reports:", R.version$arch, "\n")' 2>&1 | Write-Host
+          } else {
+            Write-Host "emulated R not found at $emul"
+          }
