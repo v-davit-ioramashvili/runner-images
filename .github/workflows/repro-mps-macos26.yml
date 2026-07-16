@@ -155,6 +155,56 @@ jobs:
           python -m pip install --quiet "torch==${{ matrix.torch }}" torchvision numpy opencv-python-headless huggingface_hub
           python -m pip install --quiet "git+https://github.com/facebookresearch/sam2@2b90b9f5ceec907a1c18123530e92e794ad901a4"
 
+      # Only torch is pinned above; torchvision/numpy/opencv are resolved by pip, and
+      # pip selects wheels by platform tag, which differs between macOS 15 and 26. So
+      # dump the resolved stack to prove the Python side is identical across images.
+      #
+      # Then dump the Metal/MPS framework versions. These are NOT in the torch wheel --
+      # they ship with the OS, and torch's MPS backend calls into them at runtime. That
+      # is the mechanism by which one identical torch binary can behave differently on
+      # two macOS versions, and this step is what turns that from a claim into evidence.
+      - name: Show resolved deps and OS Metal/MPS framework versions
+        run: |
+          echo "=== resolved Python stack (should match across images) ==="
+          python -m pip freeze | grep -iE "^(torch|torchvision|numpy|opencv|pillow|hydra|iopath|SAM)" || true
+          echo
+          echo "=== wheels actually chosen (platform tag is baked into the filename) ==="
+          python - <<'PY'
+          import importlib.metadata as md
+          for name in ["torch", "torchvision", "numpy", "opencv-python-headless"]:
+              try:
+                  d = md.distribution(name)
+                  wheel = next((f for f in (d.files or []) if str(f).endswith("WHEEL")), None)
+                  tag = ""
+                  if wheel:
+                      tag = " | ".join(
+                          line for line in d.read_text(str(wheel)).splitlines()
+                          if line.startswith("Tag:")
+                      )
+                  print(f"{name:24s} {d.version:12s} {tag}")
+              except Exception as e:
+                  print(f"{name:24s} <{type(e).__name__}: {e}>")
+          PY
+          echo
+          echo "=== macOS ==="
+          sw_vers
+          echo
+          echo "=== Metal / MPS frameworks (ship WITH the OS, not with torch) ==="
+          for fw in Metal MetalPerformanceShaders MetalPerformanceShadersGraph; do
+            found=""
+            for p in "/System/Library/Frameworks/$fw.framework/Resources/Info.plist" \
+                     "/System/Library/Frameworks/$fw.framework/Versions/Current/Resources/Info.plist"; do
+              if [ -f "$p" ]; then
+                v=$(plutil -extract CFBundleVersion raw "$p" 2>/dev/null || echo "?")
+                s=$(plutil -extract CFBundleShortVersionString raw "$p" 2>/dev/null || echo "?")
+                echo "$fw: version=$v short=$s"
+                found=1
+                break
+              fi
+            done
+            [ -n "$found" ] || echo "$fw: <no Info.plist on disk (dyld shared cache)>"
+          done
+
       - name: Run SAM2 mask generation on CPU and MPS
         run: |
           cat > sam2_probe.py <<'PY'
