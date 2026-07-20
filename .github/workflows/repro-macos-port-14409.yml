@@ -1,0 +1,102 @@
+name: repro-macos-port-14409
+
+on: workflow_dispatch
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15, macos-26, macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Environment info
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          uname -a
+          if [ "$(uname)" = "Darwin" ]; then
+            sw_vers
+            echo "HostName=$(scutil --get HostName 2>&1)"
+            echo "LocalHostName=$(scutil --get LocalHostName 2>&1)"
+            echo "ComputerName=$(scutil --get ComputerName 2>&1)"
+          fi
+          echo "--- /etc/hosts ---"
+          cat /etc/hosts
+          echo "--- python locations/versions ---"
+          which -a python python3 2>&1 || true
+          python -VV 2>&1 || true
+          python3 -VV 2>&1 || true
+
+      - name: getfqdn / reverse-DNS timing (suspected culprit)
+        run: |
+          for h in "127.0.0.1" "0.0.0.0" "" "localhost"; do
+            python3 -c "import socket,sys,time; h=sys.argv[1]; t=time.time(); r=socket.getfqdn(h); print('getfqdn(%r) -> %r in %.2fs' % (h, r, time.time()-t))" "$h"
+          done
+          python3 -c "import socket,time; t=time.time()
+          try:
+              r = socket.gethostbyaddr('127.0.0.1')
+          except Exception as e:
+              r = repr(e)
+          print('gethostbyaddr(127.0.0.1) -> %s in %.2fs' % (r, time.time()-t))"
+
+      - name: bare bind+listen (bypasses http.server)
+        run: |
+          python3 -c "
+          import socket, time
+          s = socket.socket()
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          s.bind(('127.0.0.1', 8005))
+          s.listen(5)
+          print('bind+listen OK', flush=True)
+          time.sleep(20)" &
+          sleep 2
+          echo "=== port 8005 state at t=2s ==="
+          if [ "$(uname)" = "Darwin" ]; then
+            netstat -anv | grep '\.8005' || echo "no socket found"
+          else
+            ss -atn | grep ':8005' || echo "no socket found"
+          fi
+          wait
+
+      - name: reporter repro + extended observation
+        run: |
+          nc -l 8001 > /tmp/nc.log 2>&1 &
+          python  -m http.server 8002 --bind 127.0.0.1 > /tmp/py8002.log 2>&1 &
+          python3 -m http.server 8003 --bind 127.0.0.1 > /tmp/py8003.log 2>&1 &
+          if [ "$(uname)" = "Darwin" ]; then
+            /usr/bin/python3 -m http.server 8004 --bind 127.0.0.1 > /tmp/py8004.log 2>&1 &
+          fi
+          prev=0
+          for t in 2 10 30 65; do
+            sleep $((t - prev)); prev=$t
+            echo "=== socket states at t=${t}s ==="
+            if [ "$(uname)" = "Darwin" ]; then
+              netstat -anv | grep -E '\.800[1-4] ' || echo "no sockets found"
+            else
+              ss -atn | grep -E ':800[1-3]' || echo "no sockets found"
+            fi
+          done
+          echo "=== curl checks (5s timeout each) ==="
+          for p in 8002 8003 8004; do
+            curl -s -o /dev/null -w "port $p -> HTTP %{http_code}\n" --max-time 5 "http://127.0.0.1:$p/" || echo "port $p -> curl failed rc=$?"
+          done
+          echo "=== python server stdout/stderr ==="
+          for p in 8002 8003 8004; do
+            echo "--- port $p ---"; cat /tmp/py$p.log 2>/dev/null || true
+          done
+
+      - name: firewall state (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate || true
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall || true
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --listapps || true
+          sudo pfctl -s info 2>/dev/null || true
+
+      - name: mDNSResponder state (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo launchctl print system/com.apple.mDNSResponder 2>&1 | head -30 || true
+          echo "--- scutil --dns (first 40 lines) ---"
+          scutil --dns | head -40
