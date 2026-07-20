@@ -70,22 +70,24 @@ jobs:
           srv = ThreadingHTTPServer(('127.0.0.1', 8006), SimpleHTTPRequestHandler)
           print('patched server listening in %.2fs' % (time.time()-t), flush=True)
           srv.serve_forever()" > /tmp/py8006.log 2>&1 &
+          # candidate user-facing workaround: same CLI, getfqdn stubbed via runpy
+          python3 -c "import socket, runpy; socket.getfqdn = lambda name='': name; runpy.run_module('http.server', run_name='__main__')" 8008 --bind 127.0.0.1 > /tmp/py8008.log 2>&1 &
           prev=0
           for t in 2 10 30 65 120 180; do
             sleep $((t - prev)); prev=$t
             echo "=== socket states at t=${t}s ==="
             if [ "$(uname)" = "Darwin" ]; then
-              netstat -anv | grep -E '\.800[1-6] ' || echo "no sockets found"
+              netstat -anv | grep -E '\.800[1-8] ' || echo "no sockets found"
             else
-              ss -atn | grep -E ':800[1-6]' || echo "no sockets found"
+              ss -atn | grep -E ':800[1-8]' || echo "no sockets found"
             fi
           done
           echo "=== curl checks (5s timeout each) ==="
-          for p in 8002 8003 8004 8006; do
+          for p in 8002 8003 8004 8006 8008; do
             curl -s -o /dev/null -w "port $p -> HTTP %{http_code}\n" --max-time 5 "http://127.0.0.1:$p/" || echo "port $p -> curl failed rc=$?"
           done
           echo "=== python server stdout/stderr ==="
-          for p in 8002 8003 8004 8006; do
+          for p in 8002 8003 8004 8006 8008; do
             echo "--- port $p ---"; cat /tmp/py$p.log 2>/dev/null || true
           done
 
