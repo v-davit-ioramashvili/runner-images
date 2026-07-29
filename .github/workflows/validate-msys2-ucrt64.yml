@@ -1,0 +1,59 @@
+# TEMPORARY - validation aid for the x64 UCRT64 follow-up (depends on #14437).
+# Runs the real Configure-Shell.ps1 on a hosted windows-2025 runner and checks
+# that the generated msys2bash.cmd selects the UCRT64 environment and resolves
+# /ucrt64/bin, the way an x64 image would after this change.
+# Delete this file before opening the PR.
+
+name: Validate MSYS2 UCRT64 on x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/msys2-ucrt64*'
+
+jobs:
+  ucrt64:
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - what the image ships today
+        shell: pwsh
+        run: |
+          Get-Content C:\shells\msys2bash.cmd
+
+      - name: Regenerate msys2bash.cmd from this branch and check the environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          # the shipped image already has C:\shells; the script expects to create it
+          if (Test-Path C:\shells) { Remove-Item -LiteralPath C:\shells -Recurse -Force }
+          . .\images\windows\scripts\build\Configure-Shell.ps1
+
+          Write-Host "--- generated msys2bash.cmd ---"
+          Get-Content C:\shells\msys2bash.cmd
+          if (-not (Select-String -Path C:\shells\msys2bash.cmd -Pattern 'MSYSTEM=UCRT64' -Quiet)) {
+            throw "msys2bash.cmd is not set to UCRT64"
+          }
+
+      - name: Run a shell through the wrapper and confirm it resolves /ucrt64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $probe = 'echo "MSYSTEM=$MSYSTEM"; ' +
+                   'echo "MSYSTEM_PREFIX=$MSYSTEM_PREFIX"; ' +
+                   'echo "MINGW_PREFIX=$MINGW_PREFIX"; ' +
+                   'echo "PATH[0]=$(echo $PATH | cut -d: -f1)"'
+          $out = & C:\shells\msys2bash.cmd -c $probe
+          $out | ForEach-Object { Write-Host "  $_" }
+          if (($out -join "`n") -notmatch 'MSYSTEM_PREFIX=/ucrt64') {
+            throw "wrapper did not resolve the /ucrt64 prefix"
+          }
+          if (($out -join "`n") -notmatch 'PATH\[0\]=/ucrt64/bin') {
+            throw "/ucrt64/bin was not first on PATH"
+          }
+          Write-Host "OK - msys2bash.cmd selects UCRT64 and prepends /ucrt64/bin"
