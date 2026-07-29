@@ -108,7 +108,7 @@ function Install-MingwPackages {
 Install-Msys2
 
 # Add msys2 bin tools folders to PATH temporary
-$msysExecDir = if (Test-IsArm64) { "clangarm64" } else { "mingw64" }
+$msysExecDir = if (Test-IsArm64) { "clangarm64" } else { "ucrt64" }
 $env:PATH = "C:\msys64\$msysExecDir\bin;C:\msys64\usr\bin;$origPath"
 
 Write-Host "$logPrefix pacman --noconfirm -Syyuu"
