@@ -25,6 +25,13 @@ jobs:
         run: |
           Get-Content C:\shells\msys2bash.cmd
 
+      - name: Warm up msys2 so first-launch setup does not skew the probe
+        shell: pwsh
+        run: |
+          $env:MSYSTEM = 'MSYS'
+          & C:\msys64\usr\bin\bash.exe -lc 'echo warmup done'
+          exit 0
+
       - name: Regenerate msys2bash.cmd from this branch and check the environment
         shell: pwsh
         run: |
@@ -44,16 +51,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $probe = 'echo "MSYSTEM=$MSYSTEM"; ' +
-                   'echo "MSYSTEM_PREFIX=$MSYSTEM_PREFIX"; ' +
-                   'echo "MINGW_PREFIX=$MINGW_PREFIX"; ' +
-                   'echo "PATH[0]=$(echo $PATH | cut -d: -f1)"'
-          $out = & C:\shells\msys2bash.cmd -c $probe
-          $out | ForEach-Object { Write-Host "  $_" }
-          if (($out -join "`n") -notmatch 'MSYSTEM_PREFIX=/ucrt64') {
-            throw "wrapper did not resolve the /ucrt64 prefix"
-          }
-          if (($out -join "`n") -notmatch 'PATH\[0\]=/ucrt64/bin') {
-            throw "/ucrt64/bin was not first on PATH"
-          }
+          # write the probe as a script file (array of lines, not a here-string,
+          # since a here-string terminator cannot sit at column 0 inside YAML)
+          $probe = @(
+            'echo "MSYSTEM=${MSYSTEM}"',
+            'echo "MSYSTEM_PREFIX=${MSYSTEM_PREFIX}"',
+            'echo "MINGW_PREFIX=${MINGW_PREFIX}"',
+            'echo "PATH0=${PATH%%:*}"'
+          )
+          Set-Content -Path probe.sh -Value $probe -Encoding ascii
+          $out = (& C:\shells\msys2bash.cmd probe.sh) -join "`n"
+          Write-Host $out
+          if ($out -notmatch 'MSYSTEM_PREFIX=/ucrt64') { throw "wrapper did not resolve the /ucrt64 prefix" }
+          if ($out -notmatch 'PATH0=/ucrt64/bin')     { throw "/ucrt64/bin was not first on PATH" }
           Write-Host "OK - msys2bash.cmd selects UCRT64 and prepends /ucrt64/bin"
