@@ -1,0 +1,130 @@
+# TEMPORARY - validation aid for #14474. Delete before opening the PR.
+#
+# Iteration 1: reproduced the alert; seeding /bin/bash changed nothing.
+# Iteration 2: replayd keys approvals by the *responsible* process, which on a
+#   hosted runner is /opt/hca/hosted-compute-agent, not /bin/bash. Seeding that
+#   key suppressed the alert on all three images.
+# Iteration 3 (this one): runs the actual build script from this branch, rather
+#   than an inline approximation, to check that the committed change does the
+#   job - including its cfprefsd flush and read-back assertion.
+#
+# The TCC seeding in that script needs ~/utils/utils.sh and writes to the system
+# TCC.db, neither of which belongs in a job, so those two helpers are stubbed
+# out; everything after them is the real thing.
+#
+# Note this is a harsher test than the build: replayd is already running with no
+# approvals file when the script writes it, whereas after a real build the VM
+# reboots and replayd starts fresh with the file in place. If it holds here it
+# holds there. What no workflow can cover is VM sealing.
+
+name: Validate macOS screen-recording popup
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/macos-screenrec*'
+
+jobs:
+  screenrec:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-15-intel, macos-15, macos-26]
+        mode: [baseline, build-script]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+
+    env:
+      APPROVALS_PLIST: ${{ github.workspace }}/approvals-path.txt
+      RESPONSIBLE_CLIENT: /opt/hca/hosted-compute-agent
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Image facts and approval state as shipped
+        run: |
+          sw_vers
+          plist="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
+          echo "$plist" > "$APPROVALS_PLIST"
+          if [ -f "$plist" ]; then
+            plutil -p "$plist"
+          else
+            echo "ScreenCaptureApprovals.plist does not exist in the image"
+          fi
+
+      - name: Run the real build script from this branch
+        if: matrix.mode == 'build-script'
+        run: |
+          # stub the two helpers the TCC seeding needs; the screen capture
+          # approval block after them runs unmodified
+          mkdir -p ~/utils
+          cat > ~/utils/utils.sh <<'EOF'
+          configure_system_tccdb () { :; }
+          configure_user_tccdb () { :; }
+          EOF
+
+          echo "--- running configure-tccdb-macos.sh ---"
+          bash -e -o pipefail images/macos/scripts/build/configure-tccdb-macos.sh
+          echo "script exit code: $?"
+
+          echo "--- approvals file the script produced ---"
+          plutil -p "$(cat "$APPROVALS_PLIST")"
+
+          # deliberately NOT restarting replayd - the build does not either
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Record the screen and look for the alert
+        run: |
+          if pgrep -x UserNotificationCenter >/dev/null; then
+            echo "UNC_BEFORE=running"
+          else
+            echo "UNC_BEFORE=absent"
+          fi
+
+          ffmpeg -y -nostdin -f avfoundation \
+            -video_size 1920x1080 \
+            -r 30 \
+            -i "0:none" \
+            -codec:v mpeg4 \
+            -b:v 10000k \
+            -t 15 \
+            screen_recording.mp4 > ffmpeg.log 2>&1 &
+          ffmpeg_pid=$!
+
+          sleep 6
+
+          if pgrep -x UserNotificationCenter >/dev/null; then
+            echo "ALERT_PRESENT=true"
+          else
+            echo "ALERT_PRESENT=false"
+          fi
+
+          screencapture -x mid-recording.png || echo "screencapture failed"
+
+          wait $ffmpeg_pid; rc=$?
+          echo "ffmpeg exit code: $rc"
+          ls -la screen_recording.mp4 || true
+          exit $rc
+
+      - name: Approval state after the capture
+        if: always()
+        run: |
+          plist="$(cat "$APPROVALS_PLIST")"
+          if [ -f "$plist" ]; then
+            plutil -p "$plist"
+          else
+            echo "ScreenCaptureApprovals.plist still does not exist"
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrec-${{ matrix.image }}-${{ matrix.mode }}
+          path: |
+            mid-recording.png
+            ffmpeg.log
+          if-no-files-found: warn
