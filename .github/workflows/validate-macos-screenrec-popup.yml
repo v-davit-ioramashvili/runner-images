@@ -1,0 +1,152 @@
+# TEMPORARY - validation aid for #14474.
+# Reproduces the Sequoia "bash is requesting to bypass the system private window
+# picker" alert on a hosted macos-15 runner while ffmpeg/avfoundation records the
+# screen, then re-runs the same capture with the candidate fix applied
+# (far-future approval date in replayd's ScreenCaptureApprovals.plist) to check
+# whether the alert is suppressed.
+# Delete this file before opening the PR.
+
+name: Validate macOS screen-recording popup
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/macos-screenrec*'
+
+jobs:
+  screenrec:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-15-intel, macos-15, macos-26]
+        mode: [baseline, patched]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+
+    env:
+      APPROVALS_PLIST: ${{ github.workspace }}/approvals-path.txt
+      FUTURE_DATE: '3024-01-01 00:00:00 +0000'
+
+    steps:
+      - name: Image and shell facts
+        run: |
+          sw_vers
+          echo "whoami: $(whoami)"
+          echo "HOME: $HOME"
+          echo "SHELL of this step: $(ps -p $$ -o comm=)"
+          echo "responsible binary: $(ps -p $$ -o args=)"
+
+      - name: TCC state for ScreenCapture
+        run: |
+          sys_db="/Library/Application Support/com.apple.TCC/TCC.db"
+          usr_db="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+
+          echo "--- access table schema (does it have last_reminded?) ---"
+          sudo sqlite3 "$sys_db" ".schema access" || echo "could not read system TCC.db"
+
+          echo "--- system TCC.db, ScreenCapture rows ---"
+          sudo sqlite3 -header -column "$sys_db" \
+            "SELECT service, client, auth_value, last_modified, last_reminded FROM access WHERE service='kTCCServiceScreenCapture';" \
+            || echo "could not read system TCC.db"
+
+          echo "--- user TCC.db, ScreenCapture rows ---"
+          sqlite3 -header -column "$usr_db" \
+            "SELECT service, client, auth_value, last_modified, last_reminded FROM access WHERE service='kTCCServiceScreenCapture';" \
+            || echo "could not read user TCC.db"
+
+      - name: replayd approval state as shipped
+        run: |
+          plist="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
+          echo "$plist" > "$APPROVALS_PLIST"
+          ls -la "$HOME/Library/Group Containers/group.com.apple.replayd/" || echo "group container missing"
+          if [ -f "$plist" ]; then
+            plutil -p "$plist"
+          else
+            echo "ScreenCaptureApprovals.plist does not exist in the image"
+          fi
+
+      - name: Apply candidate fix - pre-approve screen capture far into the future
+        if: matrix.mode == 'patched'
+        run: |
+          plist="$(cat "$APPROVALS_PLIST")"
+          mkdir -p "$(dirname "$plist")"
+
+          # the alert names "bash", so /bin/bash is the responsible client; seed the
+          # brew ffmpeg paths too in case replayd keys off the requesting binary
+          for client in /bin/bash /usr/local/bin/ffmpeg /opt/homebrew/bin/ffmpeg; do
+            defaults write "$plist" "$client" -date "$FUTURE_DATE"
+          done
+
+          echo "--- after write ---"
+          plutil -p "$plist"
+
+          # replayd caches the approvals; restart it so it re-reads them
+          sudo killall replayd 2>/dev/null || echo "replayd was not running"
+          sleep 5
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Record the screen and look for the alert
+        run: |
+          set -x
+          ffmpeg -y -nostdin -f avfoundation \
+            -video_size 1920x1080 \
+            -r 30 \
+            -i "0:none" \
+            -codec:v mpeg4 \
+            -b:v 10000k \
+            -t 15 \
+            screen_recording.mp4 > ffmpeg.log 2>&1 &
+          ffmpeg_pid=$!
+          set +x
+
+          sleep 6
+
+          echo "--- processes that could own the alert ---"
+          pgrep -fl 'replayd|UserNotification|ScreenCaptureApproval|CoreServicesUIAgent|ControlCenter' || true
+
+          echo "--- every open window, per process ---"
+          windows=$(osascript -e 'tell application "System Events" to get every window of (every process whose class of windows contains window)' 2>&1 || true)
+          echo "$windows"
+
+          echo "--- screenshot mid-recording ---"
+          screencapture -x mid-recording.png || echo "screencapture failed"
+
+          if echo "$windows" | grep -qiE 'window .*(UserNotificationCenter|ScreenCaptureApproval|ControlCenter|CoreServicesUIAgent)'; then
+            echo "ALERT_WINDOW_PRESENT=true"
+          else
+            echo "ALERT_WINDOW_PRESENT=false"
+          fi
+
+          wait $ffmpeg_pid; rc=$?
+          echo "ffmpeg exit code: $rc"
+          tail -20 ffmpeg.log
+          ls -la screen_recording.mp4 || true
+          exit $rc
+
+      - name: replayd approval state after the capture
+        if: always()
+        run: |
+          plist="$(cat "$APPROVALS_PLIST")"
+          if [ -f "$plist" ]; then
+            plutil -p "$plist"
+          else
+            echo "ScreenCaptureApprovals.plist still does not exist"
+          fi
+
+          echo "--- replayd / TCC log for this job ---"
+          log show --last 5m --style compact \
+            --predicate 'process == "replayd" OR process == "tccd" OR subsystem == "com.apple.TCC"' \
+            2>/dev/null | grep -iE 'screen|approv|bypass|picker' | tail -40 || echo "nothing in the log"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrec-${{ matrix.image }}-${{ matrix.mode }}
+          path: |
+            mid-recording.png
+            ffmpeg.log
+          if-no-files-found: warn
