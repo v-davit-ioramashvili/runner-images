@@ -62,6 +62,16 @@ jobs:
           # builds rely on this file from configure-apt.sh
           echo 'APT::Get::Assume-Yes "true";' | sudo tee /etc/apt/apt.conf.d/90assumeyes
 
+          # the script ends with `invoke_tests`, which configure-environment.sh
+          # exposes as a symlink on PATH
+          sudo chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
+          sudo ln -sf "$HELPER_SCRIPTS/invoke-tests.sh" /usr/local/bin/invoke_tests
+
+          # Pester must be visible to root's pwsh, since the script runs under sudo
+          sudo pwsh -Command "if (-not (Get-Module -ListAvailable Pester)) {
+            Install-Module Pester -Force -Scope AllUsers -SkipPublisherCheck }
+            (Get-Module -ListAvailable Pester | Select-Object -First 1).Version.ToString()"
+
           echo "toolset pins postgresql: $(jq -r '.postgresql.version' "$INSTALLER_SCRIPT_FOLDER/toolset.json")"
 
       - name: Measure disk before
