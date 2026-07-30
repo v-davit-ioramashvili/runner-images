@@ -1,0 +1,151 @@
+# TEMPORARY - validation aid for #14070.
+# Confirms PostgreSQL is absent on the hosted Ubuntu ARM64 runners today, then runs
+# the real install-postgresql.sh from this branch to prove it installs cleanly on
+# arm64, measures the actual on-disk cost and install time, runs the Pester tests
+# that this PR un-skips for ARM64, and builds psycopg2 from source (the scenario
+# from the issue).
+# Delete this file before opening the PR.
+
+name: Validate PostgreSQL ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/postgresql-arm64*'
+
+jobs:
+  postgresql:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04-arm
+            toolset: toolset-2204-arm64.json
+          - runner: ubuntu-24.04-arm
+            toolset: toolset-2404-arm64.json
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    env:
+      HELPER_SCRIPTS: ${{ github.workspace }}/images/ubuntu/scripts/helpers
+      INSTALLER_SCRIPT_FOLDER: /imagegeneration/installers
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Confirm the arch and that PostgreSQL is absent today
+        run: |
+          echo "uname -m : $(uname -m)"
+          lsb_release -a || true
+          test "$(uname -m)" = "aarch64" || { echo "not an arm64 runner"; exit 1; }
+
+          echo "--- what is present before the install ---"
+          for c in psql pg_config pg_isready pg_dump createdb; do
+            printf '%-12s : %s\n' "$c" "$(command -v $c || echo 'NOT FOUND')"
+          done
+          # libpq headers are what the issue reporter actually needs
+          printf '%-12s : %s\n' "libpq-fe.h" "$(ls /usr/include/postgresql/libpq-fe.h 2>/dev/null || echo 'NOT FOUND')"
+
+      - name: Stage the build environment the packer template provides
+        run: |
+          set -euxo pipefail
+          # the image build runs these scripts with apt pre-configured, the toolset
+          # staged under INSTALLER_SCRIPT_FOLDER and the tests under /imagegeneration/tests
+          sudo install -d "$INSTALLER_SCRIPT_FOLDER" /imagegeneration/tests
+          sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" "$INSTALLER_SCRIPT_FOLDER/toolset.json"
+          sudo cp images/ubuntu/scripts/tests/*.ps1 images/ubuntu/scripts/tests/*.psm1 /imagegeneration/tests/
+
+          # install-postgresql.sh calls plain `apt-get install` with no -y; the real
+          # builds rely on this file from configure-apt.sh
+          echo 'APT::Get::Assume-Yes "true";' | sudo tee /etc/apt/apt.conf.d/90assumeyes
+
+          echo "toolset pins postgresql: $(jq -r '.postgresql.version' "$INSTALLER_SCRIPT_FOLDER/toolset.json")"
+
+      - name: Measure disk before
+        run: |
+          df -B1 --output=used / | tail -1 > /tmp/disk_before
+          echo "used bytes before: $(cat /tmp/disk_before)"
+
+      - name: Run the real install-postgresql.sh from this branch
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          sudo -E HELPER_SCRIPTS="$HELPER_SCRIPTS" \
+                  INSTALLER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER" \
+                  DEBIAN_FRONTEND=noninteractive \
+                  bash images/ubuntu/scripts/build/install-postgresql.sh
+          end=$(date +%s)
+          echo "INSTALL_SECONDS=$((end - start))" >> $GITHUB_ENV
+          echo "install took $((end - start))s"
+
+      - name: Measure the real on-image cost
+        run: |
+          df -B1 --output=used / | tail -1 > /tmp/disk_after
+          before=$(cat /tmp/disk_before); after=$(cat /tmp/disk_after)
+          delta=$((after - before))
+          echo "delta bytes: $delta"
+          echo "DISK_DELTA_MIB=$((delta / 1024 / 1024))" >> $GITHUB_ENV
+
+          echo "--- package payload (dpkg) ---"
+          dpkg-query -W -f='${Installed-Size}\t${Package}\n' 'postgresql*' 'libpq*' 2>/dev/null | sort -rn | head
+          echo "--- the initdb cluster the script does not remove ---"
+          sudo du -sh /var/lib/postgresql 2>/dev/null || echo "no cluster dir"
+
+      - name: Verify the tools the issue asks for
+        run: |
+          set -euo pipefail
+          expected=$(jq -r '.postgresql.version' "$INSTALLER_SCRIPT_FOLDER/toolset.json")
+          echo "expected major version: $expected"
+
+          for c in psql pg_config pg_isready pg_dump pg_restore createdb; do
+            printf '%-12s : %s\n' "$c" "$(command -v $c || echo 'NOT FOUND')"
+            command -v "$c" >/dev/null || { echo "MISSING: $c"; exit 1; }
+          done
+
+          psql --version
+          pg_config --version
+          [ -f /usr/include/postgresql/libpq-fe.h ] || { echo "libpq-dev headers missing"; exit 1; }
+          echo "OK - libpq-fe.h present"
+
+          # the service must be installed but disabled, as on x64
+          systemctl is-enabled postgresql.service || true
+          if systemctl is-enabled --quiet postgresql.service; then
+            echo "postgresql.service is still enabled - expected disabled"; exit 1
+          fi
+          echo "OK - postgresql.service is disabled by default"
+
+      - name: Run the Pester tests this PR un-skips on ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          # proves the previously -Skip:(Test-IsArm64) block actually passes on arm64
+          sudo -E INSTALLER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER" pwsh -Command "
+            Import-Module '/imagegeneration/tests/Helpers.psm1' -DisableNameChecking
+            Invoke-PesterTests -TestFile 'Databases' -TestName 'PostgreSQL'"
+
+      - name: Reproduce the issue scenario - build psycopg2 from source
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/pgvenv
+          /tmp/pgvenv/bin/pip install --upgrade pip wheel >/dev/null
+          # psycopg2 (not -binary) compiles against libpq - this is what the reporter could not do
+          /tmp/pgvenv/bin/pip install --no-binary :all: psycopg2
+          /tmp/pgvenv/bin/python -c "import psycopg2; print('psycopg2', psycopg2.__version__)"
+          echo "OK - psycopg2 built from source against libpq"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### PostgreSQL ARM64 validation - ${{ matrix.runner }}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            echo "| Toolset version | $(jq -r '.postgresql.version' "$INSTALLER_SCRIPT_FOLDER/toolset.json" 2>/dev/null || echo n/a) |"
+            echo "| psql | $(psql --version 2>/dev/null || echo 'not installed') |"
+            echo "| Install time | ${INSTALL_SECONDS:-n/a}s |"
+            echo "| Disk delta (real, incl. cluster) | ${DISK_DELTA_MIB:-n/a} MiB |"
+          } >> $GITHUB_STEP_SUMMARY
