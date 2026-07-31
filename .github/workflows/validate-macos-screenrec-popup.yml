@@ -2,20 +2,20 @@
 #
 # Iteration 1: reproduced the alert; seeding /bin/bash changed nothing.
 # Iteration 2: replayd keys approvals by the *responsible* process, which on a
-#   hosted runner is /opt/hca/hosted-compute-agent, not /bin/bash. Seeding that
-#   key suppressed the alert on all three images.
-# Iteration 3 (this one): runs the actual build script from this branch, rather
-#   than an inline approximation, to check that the committed change does the
-#   job - including its cfprefsd flush and read-back assertion.
+#   hosted runner is /opt/hca/hosted-compute-agent, not /bin/bash.
+# Iteration 3: ran the committed build script itself - alert suppressed.
+# Iteration 4 (this one): re-runs iteration 3 against the current script, now
+#   that the read-back assertion has been replaced by a test, and checks that
+#   the new System.Tests.ps1 assertion guards something - it must pass on a
+#   seeded runner and FAIL on an unseeded one.
 #
-# The TCC seeding in that script needs ~/utils/utils.sh and writes to the system
-# TCC.db, neither of which belongs in a job, so those two helpers are stubbed
-# out; everything after them is the real thing.
+# The TCC seeding in the build script needs ~/utils/utils.sh and writes to the
+# system TCC.db, neither of which belongs in a job, so those two helpers are
+# stubbed; everything after them is the real thing.
 #
-# Note this is a harsher test than the build: replayd is already running with no
-# approvals file when the script writes it, whereas after a real build the VM
-# reboots and replayd starts fresh with the file in place. If it holds here it
-# holds there. What no workflow can cover is VM sealing.
+# Stricter than a real build: replayd is already running with no approvals file
+# when the script writes it, and is never restarted. What no workflow can cover
+# is VM sealing.
 
 name: Validate macOS screen-recording popup
 
@@ -37,7 +37,6 @@ jobs:
 
     env:
       APPROVALS_PLIST: ${{ github.workspace }}/approvals-path.txt
-      RESPONSIBLE_CLIENT: /opt/hca/hosted-compute-agent
 
     steps:
       - uses: actions/checkout@v5
@@ -56,34 +55,45 @@ jobs:
       - name: Run the real build script from this branch
         if: matrix.mode == 'build-script'
         run: |
-          # stub the two helpers the TCC seeding needs; the screen capture
-          # approval block after them runs unmodified
           mkdir -p ~/utils
           cat > ~/utils/utils.sh <<'EOF'
           configure_system_tccdb () { :; }
           configure_user_tccdb () { :; }
           EOF
 
-          echo "--- running configure-tccdb-macos.sh ---"
           bash -e -o pipefail images/macos/scripts/build/configure-tccdb-macos.sh
           echo "script exit code: $?"
-
-          echo "--- approvals file the script produced ---"
           plutil -p "$(cat "$APPROVALS_PLIST")"
 
-          # deliberately NOT restarting replayd - the build does not either
+      - name: Check the image test guards the approval
+        run: |
+          cat > run-test.ps1 <<'EOF'
+          $config = [PesterConfiguration]@{
+              Run    = @{ Path = "images/macos/scripts/tests/System.Tests.ps1"; PassThru = $true }
+              Filter = @{ FullName = "Screen capture approval*" }
+              Output = @{ Verbosity = "Detailed" }
+          }
+          $r = Invoke-Pester -Configuration $config
+          "PESTER_RESULT passed=$($r.PassedCount) failed=$($r.FailedCount)"
+          EOF
+
+          pwsh -File run-test.ps1 | tee pester.log
+
+          if [ "${{ matrix.mode }}" = "build-script" ]; then
+            grep -q "PESTER_RESULT passed=1 failed=0" pester.log \
+              || { echo "FAIL: test did not pass although the approval is seeded"; exit 1; }
+            echo "OK - test passes when the approval is seeded"
+          else
+            grep -q "PESTER_RESULT passed=0 failed=1" pester.log \
+              || { echo "FAIL: test did not fail on an unseeded image - it guards nothing"; exit 1; }
+            echo "OK - test fails when the approval is missing"
+          fi
 
       - name: Install FFmpeg
         run: brew install ffmpeg
 
       - name: Record the screen and look for the alert
         run: |
-          if pgrep -x UserNotificationCenter >/dev/null; then
-            echo "UNC_BEFORE=running"
-          else
-            echo "UNC_BEFORE=absent"
-          fi
-
           ffmpeg -y -nostdin -f avfoundation \
             -video_size 1920x1080 \
             -r 30 \
@@ -106,18 +116,7 @@ jobs:
 
           wait $ffmpeg_pid; rc=$?
           echo "ffmpeg exit code: $rc"
-          ls -la screen_recording.mp4 || true
           exit $rc
-
-      - name: Approval state after the capture
-        if: always()
-        run: |
-          plist="$(cat "$APPROVALS_PLIST")"
-          if [ -f "$plist" ]; then
-            plutil -p "$plist"
-          else
-            echo "ScreenCaptureApprovals.plist still does not exist"
-          fi
 
       - name: Upload evidence
         if: always()
@@ -127,4 +126,5 @@ jobs:
           path: |
             mid-recording.png
             ffmpeg.log
+            pester.log
           if-no-files-found: warn

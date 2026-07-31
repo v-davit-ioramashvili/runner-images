@@ -113,10 +113,6 @@ approvalsPlist="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCap
 mkdir -p "$(dirname "$approvalsPlist")"
 defaults write "$approvalsPlist" "/opt/hca/hosted-compute-agent" -date "3024-01-01 00:00:00 +0000"
 
-# flush the preferences cache and read the value back, so the build fails here
-# rather than shipping an image where the alert is still armed
+# flush the preferences cache so the write is on disk; System.Tests.ps1 asserts
+# the approval is there
 killall cfprefsd 2>/dev/null || true
-if ! defaults read "$approvalsPlist" "/opt/hca/hosted-compute-agent" | grep -q "3024"; then
-    echo "Failed to seed the screen capture approval in $approvalsPlist"
-    exit 1
-fi
