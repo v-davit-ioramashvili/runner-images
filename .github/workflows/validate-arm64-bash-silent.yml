@@ -1,0 +1,1316 @@
+# TEMPORARY - diagnostic for #14052 (windows-11-arm composite bash steps
+# intermittently produce zero output and exit 0).
+# Tier 1 (facts): prove whether the bash the runner uses is native ARM64 or an
+# x86 binary under WoW64 emulation - this confirms or kills the reporter's root
+# cause. Tier 2 (repro): fire a large batch of independent `shell: bash` steps,
+# both top-level and inside a composite action, each writing a marker line; a
+# final check fails if any step silently did nothing while exiting 0.
+# Delete this file (and .github/actions/bashprobe) when done.
+
+name: Validate ARM64 bash silent skip (#14052)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/arm64-bash*'
+
+jobs:
+  facts:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Architecture of the bash toolchain the runner uses
+        shell: pwsh
+        run: |
+          function Get-PEMachine([string] $Path) {
+            if (-not (Test-Path $Path)) { return "MISSING" }
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $reader = New-Object IO.BinaryReader($stream)
+              $stream.Position = 0x3C
+              $stream.Position = $reader.ReadInt32() + 4
+              $machine = $reader.ReadUInt16()
+            } finally { $stream.Dispose() }
+            switch ($machine) {
+              0x8664  { "x64" }
+              0xAA64  { "ARM64" }
+              0x014C  { "x86" }
+              default { "0x{0:X4}" -f $machine }
+            }
+          }
+          $targets = @(
+            "C:\Program Files\Git\bin\bash.exe",
+            "C:\Program Files\Git\usr\bin\bash.exe",
+            "C:\Program Files\Git\usr\bin\msys-2.0.dll",
+            "C:\Program Files\Git\cmd\git.exe",
+            "C:\Program Files\Git\mingw64\bin\git.exe"
+          )
+          foreach ($t in $targets) { Write-Host ("{0,-8} {1}" -f (Get-PEMachine $t), $t) }
+          Write-Host "----"
+          Write-Host "Get-Command bash -> $((Get-Command bash -ErrorAction SilentlyContinue).Source)"
+          Write-Host "where.exe bash:"
+          where.exe bash
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+
+      - name: Versions and uname from bash
+        shell: bash
+        run: |
+          set -euo pipefail
+          git --version
+          bash --version | head -1
+          uname -a
+          echo "uname -m = $(uname -m)"
+
+  repro-toplevel:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b, c]
+    steps:
+      - name: Reset marker
+        shell: pwsh
+        run: Set-Content -Path "$env:GITHUB_WORKSPACE/marker.log" -Value $null
+      - name: b001
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 1 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "1" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b002
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 2 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "2" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b003
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 3 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "3" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b004
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 4 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "4" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b005
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 5 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "5" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b006
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 6 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "6" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b007
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 7 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "7" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b008
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 8 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "8" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b009
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 9 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "9" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b010
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 10 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "10" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b011
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 11 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "11" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b012
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 12 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "12" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b013
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 13 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "13" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b014
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 14 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "14" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b015
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 15 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "15" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b016
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 16 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "16" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b017
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 17 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "17" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b018
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 18 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "18" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b019
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 19 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "19" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b020
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 20 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "20" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b021
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 21 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "21" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b022
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 22 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "22" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b023
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 23 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "23" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b024
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 24 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "24" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b025
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 25 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "25" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b026
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 26 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "26" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b027
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 27 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "27" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b028
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 28 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "28" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b029
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 29 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "29" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b030
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 30 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "30" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b031
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 31 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "31" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b032
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 32 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "32" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b033
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 33 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "33" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b034
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 34 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "34" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b035
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 35 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "35" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b036
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 36 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "36" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b037
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 37 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "37" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b038
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 38 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "38" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b039
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 39 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "39" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b040
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 40 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "40" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b041
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 41 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "41" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b042
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 42 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "42" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b043
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 43 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "43" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b044
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 44 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "44" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b045
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 45 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "45" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b046
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 46 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "46" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b047
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 47 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "47" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b048
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 48 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "48" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b049
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 49 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "49" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b050
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 50 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "50" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b051
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 51 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "51" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b052
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 52 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "52" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b053
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 53 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "53" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b054
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 54 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "54" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b055
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 55 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "55" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b056
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 56 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "56" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b057
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 57 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "57" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b058
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 58 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "58" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b059
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 59 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "59" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b060
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 60 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "60" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b061
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 61 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "61" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b062
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 62 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "62" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b063
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 63 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "63" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b064
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 64 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "64" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b065
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 65 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "65" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b066
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 66 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "66" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b067
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 67 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "67" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b068
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 68 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "68" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b069
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 69 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "69" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b070
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 70 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "70" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b071
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 71 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "71" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b072
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 72 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "72" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b073
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 73 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "73" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b074
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 74 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "74" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b075
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 75 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "75" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b076
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 76 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "76" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b077
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 77 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "77" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b078
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 78 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "78" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b079
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 79 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "79" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b080
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 80 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "80" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b081
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 81 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "81" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b082
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 82 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "82" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b083
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 83 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "83" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b084
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 84 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "84" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b085
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 85 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "85" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b086
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 86 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "86" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b087
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 87 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "87" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b088
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 88 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "88" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b089
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 89 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "89" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b090
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 90 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "90" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b091
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 91 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "91" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b092
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 92 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "92" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b093
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 93 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "93" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b094
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 94 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "94" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b095
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 95 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "95" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b096
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 96 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "96" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b097
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 97 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "97" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b098
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 98 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "98" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b099
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 99 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "99" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b100
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 100 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "100" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b101
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 101 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "101" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b102
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 102 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "102" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b103
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 103 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "103" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b104
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 104 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "104" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b105
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 105 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "105" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b106
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 106 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "106" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b107
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 107 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "107" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b108
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 108 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "108" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b109
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 109 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "109" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b110
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 110 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "110" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b111
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 111 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "111" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b112
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 112 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "112" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b113
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 113 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "113" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b114
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 114 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "114" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b115
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 115 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "115" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b116
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 116 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "116" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b117
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 117 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "117" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b118
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 118 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "118" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b119
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 119 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "119" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b120
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 120 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "120" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b121
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 121 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "121" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b122
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 122 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "122" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b123
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 123 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "123" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b124
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 124 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "124" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b125
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 125 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "125" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b126
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 126 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "126" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b127
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 127 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "127" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b128
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 128 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "128" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b129
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 129 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "129" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b130
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 130 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "130" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b131
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 131 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "131" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b132
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 132 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "132" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b133
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 133 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "133" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b134
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 134 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "134" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b135
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 135 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "135" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b136
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 136 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "136" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b137
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 137 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "137" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b138
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 138 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "138" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b139
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 139 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "139" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b140
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 140 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "140" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b141
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 141 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "141" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b142
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 142 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "142" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b143
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 143 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "143" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b144
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 144 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "144" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b145
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 145 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "145" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b146
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 146 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "146" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b147
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 147 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "147" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b148
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 148 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "148" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b149
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 149 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "149" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b150
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 150 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "150" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b151
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 151 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "151" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b152
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 152 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "152" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b153
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 153 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "153" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b154
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 154 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "154" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b155
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 155 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "155" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b156
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 156 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "156" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b157
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 157 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "157" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b158
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 158 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "158" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b159
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 159 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "159" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b160
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 160 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "160" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b161
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 161 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "161" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b162
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 162 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "162" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b163
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 163 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "163" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b164
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 164 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "164" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b165
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 165 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "165" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b166
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 166 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "166" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b167
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 167 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "167" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b168
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 168 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "168" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b169
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 169 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "169" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b170
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 170 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "170" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b171
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 171 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "171" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b172
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 172 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "172" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b173
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 173 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "173" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b174
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 174 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "174" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b175
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 175 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "175" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b176
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 176 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "176" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b177
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 177 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "177" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b178
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 178 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "178" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b179
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 179 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "179" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b180
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 180 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "180" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b181
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 181 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "181" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b182
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 182 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "182" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b183
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 183 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "183" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b184
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 184 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "184" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b185
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 185 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "185" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b186
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 186 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "186" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b187
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 187 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "187" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b188
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 188 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "188" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b189
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 189 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "189" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b190
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 190 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "190" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b191
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 191 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "191" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b192
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 192 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "192" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b193
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 193 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "193" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b194
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 194 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "194" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b195
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 195 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "195" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b196
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 196 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "196" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b197
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 197 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "197" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b198
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 198 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "198" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b199
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 199 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "199" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: b200
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "iter 200 pid=$$ ppid=$PPID uname=$(uname -m)"
+          echo "200" >> "$GITHUB_WORKSPACE/marker.log"
+      - name: Check for silent skips
+        if: always()
+        shell: pwsh
+        run: |
+          $expected = 200
+          $lines = @(Get-Content "$env:GITHUB_WORKSPACE/marker.log" -ErrorAction SilentlyContinue | Where-Object { $_ -ne "" })
+          $got = $lines.Count
+          Write-Host "expected=$expected got=$got"
+          $present = @($lines | ForEach-Object { [int]$_ })
+          $missing = @(1..$expected | Where-Object { $_ -notin $present })
+          if ($missing.Count -gt 0) {
+            Write-Host "MISSING iterations: $($missing -join ',')"
+            throw "Reproduced silent skip: $($missing.Count) bash step(s) produced no output / no side effect but exited 0"
+          }
+          Write-Host "No silent skips detected in this shard."
+
+  repro-composite:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Reset marker
+        shell: pwsh
+        run: Set-Content -Path "$env:GITHUB_WORKSPACE/marker.log" -Value $null
+      - name: Run composite bash probe
+        uses: ./.github/actions/bashprobe
+      - name: Check for silent skips
+        if: always()
+        shell: pwsh
+        run: |
+          $expected = 100
+          $lines = @(Get-Content "$env:GITHUB_WORKSPACE/marker.log" -ErrorAction SilentlyContinue | Where-Object { $_ -ne "" })
+          $got = $lines.Count
+          Write-Host "expected=$expected got=$got"
+          $present = @($lines | ForEach-Object { [int]$_ })
+          $missing = @(1..$expected | Where-Object { $_ -notin $present })
+          if ($missing.Count -gt 0) {
+            Write-Host "MISSING iterations: $($missing -join ',')"
+            throw "Reproduced silent skip: $($missing.Count) bash step(s) produced no output / no side effect but exited 0"
+          }
+          Write-Host "No silent skips detected in this shard."

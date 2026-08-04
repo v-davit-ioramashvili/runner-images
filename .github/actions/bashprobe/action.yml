@@ -1,0 +1,608 @@
+# TEMPORARY - part of the #14052 diagnostic. A composite action whose bash
+# steps each append a marker line; the calling job asserts none were silently
+# skipped. Delete with the validate-arm64-bash-silent.yml workflow.
+name: bashprobe
+description: Fire many composite bash steps that each write a marker line.
+runs:
+  using: composite
+  steps:
+    - name: c001
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 1 pid=$$ ppid=$PPID"
+        echo "1" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c002
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 2 pid=$$ ppid=$PPID"
+        echo "2" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c003
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 3 pid=$$ ppid=$PPID"
+        echo "3" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c004
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 4 pid=$$ ppid=$PPID"
+        echo "4" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c005
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 5 pid=$$ ppid=$PPID"
+        echo "5" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c006
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 6 pid=$$ ppid=$PPID"
+        echo "6" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c007
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 7 pid=$$ ppid=$PPID"
+        echo "7" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c008
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 8 pid=$$ ppid=$PPID"
+        echo "8" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c009
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 9 pid=$$ ppid=$PPID"
+        echo "9" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c010
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 10 pid=$$ ppid=$PPID"
+        echo "10" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c011
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 11 pid=$$ ppid=$PPID"
+        echo "11" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c012
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 12 pid=$$ ppid=$PPID"
+        echo "12" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c013
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 13 pid=$$ ppid=$PPID"
+        echo "13" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c014
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 14 pid=$$ ppid=$PPID"
+        echo "14" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c015
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 15 pid=$$ ppid=$PPID"
+        echo "15" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c016
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 16 pid=$$ ppid=$PPID"
+        echo "16" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c017
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 17 pid=$$ ppid=$PPID"
+        echo "17" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c018
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 18 pid=$$ ppid=$PPID"
+        echo "18" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c019
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 19 pid=$$ ppid=$PPID"
+        echo "19" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c020
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 20 pid=$$ ppid=$PPID"
+        echo "20" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c021
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 21 pid=$$ ppid=$PPID"
+        echo "21" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c022
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 22 pid=$$ ppid=$PPID"
+        echo "22" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c023
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 23 pid=$$ ppid=$PPID"
+        echo "23" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c024
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 24 pid=$$ ppid=$PPID"
+        echo "24" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c025
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 25 pid=$$ ppid=$PPID"
+        echo "25" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c026
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 26 pid=$$ ppid=$PPID"
+        echo "26" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c027
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 27 pid=$$ ppid=$PPID"
+        echo "27" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c028
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 28 pid=$$ ppid=$PPID"
+        echo "28" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c029
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 29 pid=$$ ppid=$PPID"
+        echo "29" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c030
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 30 pid=$$ ppid=$PPID"
+        echo "30" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c031
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 31 pid=$$ ppid=$PPID"
+        echo "31" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c032
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 32 pid=$$ ppid=$PPID"
+        echo "32" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c033
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 33 pid=$$ ppid=$PPID"
+        echo "33" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c034
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 34 pid=$$ ppid=$PPID"
+        echo "34" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c035
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 35 pid=$$ ppid=$PPID"
+        echo "35" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c036
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 36 pid=$$ ppid=$PPID"
+        echo "36" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c037
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 37 pid=$$ ppid=$PPID"
+        echo "37" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c038
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 38 pid=$$ ppid=$PPID"
+        echo "38" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c039
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 39 pid=$$ ppid=$PPID"
+        echo "39" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c040
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 40 pid=$$ ppid=$PPID"
+        echo "40" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c041
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 41 pid=$$ ppid=$PPID"
+        echo "41" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c042
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 42 pid=$$ ppid=$PPID"
+        echo "42" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c043
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 43 pid=$$ ppid=$PPID"
+        echo "43" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c044
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 44 pid=$$ ppid=$PPID"
+        echo "44" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c045
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 45 pid=$$ ppid=$PPID"
+        echo "45" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c046
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 46 pid=$$ ppid=$PPID"
+        echo "46" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c047
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 47 pid=$$ ppid=$PPID"
+        echo "47" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c048
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 48 pid=$$ ppid=$PPID"
+        echo "48" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c049
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 49 pid=$$ ppid=$PPID"
+        echo "49" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c050
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 50 pid=$$ ppid=$PPID"
+        echo "50" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c051
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 51 pid=$$ ppid=$PPID"
+        echo "51" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c052
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 52 pid=$$ ppid=$PPID"
+        echo "52" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c053
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 53 pid=$$ ppid=$PPID"
+        echo "53" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c054
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 54 pid=$$ ppid=$PPID"
+        echo "54" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c055
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 55 pid=$$ ppid=$PPID"
+        echo "55" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c056
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 56 pid=$$ ppid=$PPID"
+        echo "56" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c057
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 57 pid=$$ ppid=$PPID"
+        echo "57" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c058
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 58 pid=$$ ppid=$PPID"
+        echo "58" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c059
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 59 pid=$$ ppid=$PPID"
+        echo "59" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c060
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 60 pid=$$ ppid=$PPID"
+        echo "60" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c061
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 61 pid=$$ ppid=$PPID"
+        echo "61" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c062
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 62 pid=$$ ppid=$PPID"
+        echo "62" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c063
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 63 pid=$$ ppid=$PPID"
+        echo "63" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c064
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 64 pid=$$ ppid=$PPID"
+        echo "64" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c065
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 65 pid=$$ ppid=$PPID"
+        echo "65" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c066
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 66 pid=$$ ppid=$PPID"
+        echo "66" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c067
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 67 pid=$$ ppid=$PPID"
+        echo "67" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c068
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 68 pid=$$ ppid=$PPID"
+        echo "68" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c069
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 69 pid=$$ ppid=$PPID"
+        echo "69" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c070
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 70 pid=$$ ppid=$PPID"
+        echo "70" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c071
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 71 pid=$$ ppid=$PPID"
+        echo "71" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c072
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 72 pid=$$ ppid=$PPID"
+        echo "72" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c073
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 73 pid=$$ ppid=$PPID"
+        echo "73" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c074
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 74 pid=$$ ppid=$PPID"
+        echo "74" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c075
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 75 pid=$$ ppid=$PPID"
+        echo "75" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c076
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 76 pid=$$ ppid=$PPID"
+        echo "76" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c077
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 77 pid=$$ ppid=$PPID"
+        echo "77" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c078
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 78 pid=$$ ppid=$PPID"
+        echo "78" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c079
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 79 pid=$$ ppid=$PPID"
+        echo "79" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c080
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 80 pid=$$ ppid=$PPID"
+        echo "80" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c081
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 81 pid=$$ ppid=$PPID"
+        echo "81" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c082
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 82 pid=$$ ppid=$PPID"
+        echo "82" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c083
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 83 pid=$$ ppid=$PPID"
+        echo "83" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c084
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 84 pid=$$ ppid=$PPID"
+        echo "84" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c085
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 85 pid=$$ ppid=$PPID"
+        echo "85" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c086
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 86 pid=$$ ppid=$PPID"
+        echo "86" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c087
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 87 pid=$$ ppid=$PPID"
+        echo "87" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c088
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 88 pid=$$ ppid=$PPID"
+        echo "88" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c089
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 89 pid=$$ ppid=$PPID"
+        echo "89" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c090
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 90 pid=$$ ppid=$PPID"
+        echo "90" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c091
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 91 pid=$$ ppid=$PPID"
+        echo "91" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c092
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 92 pid=$$ ppid=$PPID"
+        echo "92" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c093
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 93 pid=$$ ppid=$PPID"
+        echo "93" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c094
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 94 pid=$$ ppid=$PPID"
+        echo "94" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c095
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 95 pid=$$ ppid=$PPID"
+        echo "95" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c096
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 96 pid=$$ ppid=$PPID"
+        echo "96" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c097
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 97 pid=$$ ppid=$PPID"
+        echo "97" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c098
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 98 pid=$$ ppid=$PPID"
+        echo "98" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c099
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 99 pid=$$ ppid=$PPID"
+        echo "99" >> "$GITHUB_WORKSPACE/marker.log"
+    - name: c100
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "composite iter 100 pid=$$ ppid=$PPID"
+        echo "100" >> "$GITHUB_WORKSPACE/marker.log"
