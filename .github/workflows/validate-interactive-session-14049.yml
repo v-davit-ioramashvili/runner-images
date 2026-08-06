@@ -1,10 +1,11 @@
 # TEMPORARY - validation aid for #14049.
-# Measures whether the runner agent runs in an interactive desktop session,
-# comparing windows-latest (x64) against windows-11-arm. Records the canonical
-# signals (Environment.UserInteractive, the process session id vs the active
-# console session id, and the window-station name) and also reproduces the
-# reporter's Form.ActiveForm check so we can see whether that check itself
-# behaves differently across the two images.
+# Two things, on windows-latest (x64) AND windows-11-arm:
+#   1. Ground truth: the canonical session signals (UserInteractive, session vs
+#      active-console id, window station) - is the desktop actually interactive?
+#   2. Faithful repro of the reporter's exact stack: .NET 10 Desktop Runtime +
+#      Python 3.12 + Python.NET, running their verbatim demo.py, PLUS a corrected
+#      variant that pumps a real message loop - to show whether the FAILURE is in
+#      the environment or in their test's methodology.
 # Delete this file before opening any PR.
 
 name: Validate Interactive Session 14049
@@ -22,14 +23,13 @@ jobs:
       matrix:
         os: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
-      - name: Canonical interactivity signals
+      - name: Ground truth - canonical interactivity signals
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-
           Add-Type @"
           using System;
           using System.Text;
@@ -39,57 +39,132 @@ jobs:
               [DllImport("kernel32.dll")] public static extern uint GetCurrentProcessId();
               [DllImport("kernel32.dll")] public static extern bool ProcessIdToSessionId(uint dwProcessId, out uint pSessionId);
               [DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();
-              [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint dwThreadId);
-              [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
               [DllImport("user32.dll", CharSet = CharSet.Unicode)]
               public static extern bool GetUserObjectInformation(IntPtr hObj, int nIndex, StringBuilder pvInfo, int nLength, out int lpnLengthNeeded);
               public static string ObjName(IntPtr hObj) {
-                  int needed;
-                  var sb = new StringBuilder(256);
-                  GetUserObjectInformation(hObj, 2 /*UOI_NAME*/, sb, sb.Capacity, out needed);
+                  int needed; var sb = new StringBuilder(256);
+                  GetUserObjectInformation(hObj, 2, sb, sb.Capacity, out needed);
                   return sb.ToString();
               }
           }
           "@
-
           $procSession = 0
           [void][Native]::ProcessIdToSessionId([Native]::GetCurrentProcessId(), [ref]$procSession)
-          $consoleSession = [Native]::WTSGetActiveConsoleSessionId()
-          $winsta = [Native]::ObjName([Native]::GetProcessWindowStation())
-          $desktop = [Native]::ObjName([Native]::GetThreadDesktop([Native]::GetCurrentThreadId()))
-
-          Write-Host "OS matrix leg          : ${{ matrix.os }}"
-          Write-Host "OS architecture        : $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "OS leg / arch          : ${{ matrix.os }} / $env:PROCESSOR_ARCHITECTURE"
           Write-Host "Environment.UserInteractive : $([System.Environment]::UserInteractive)"
           Write-Host "Process session id     : $procSession"
-          Write-Host "Active console session : $consoleSession  (0xFFFFFFFF = no console/attached session)"
-          Write-Host "Session match          : $($procSession -eq $consoleSession)"
-          Write-Host "Window station         : $winsta   (WinSta0 = interactive; Service-0x... = non-interactive)"
-          Write-Host "Thread desktop         : $desktop"
+          Write-Host "Active console session : $([Native]::WTSGetActiveConsoleSessionId())"
+          Write-Host "Window station         : $([Native]::ObjName([Native]::GetProcessWindowStation()))  (WinSta0 = interactive)"
 
-      - name: Reproduce the reporter's Form.ActiveForm check
+      - name: Install .NET 10 Desktop Runtime (matches the reporter's step)
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
+          Invoke-WebRequest "https://dot.net/v1/dotnet-install.ps1" -OutFile "$env:RUNNER_TEMP\dotnet-install.ps1"
+          & "$env:RUNNER_TEMP\dotnet-install.ps1" -Runtime windowsdesktop -Channel 10.0 -InstallDir "$env:RUNNER_TEMP\dotnet"
+          "DOTNET_ROOT=$env:RUNNER_TEMP\dotnet" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Installed WindowsDesktop runtimes:"
+          & "$env:RUNNER_TEMP\dotnet\dotnet.exe" --list-runtimes | Select-String "WindowsDesktop"
 
-          $form = New-Object System.Windows.Forms.Form
-          $form.Text = "probe"
-          $form.Size = New-Object System.Drawing.Size(300,200)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-          $activeAfterShow = $null
-          $form.Add_Shown({
-              $form.Activate()
-              $script:activeAfterShow = [System.Windows.Forms.Form]::ActiveForm
-              $form.Close()
-          })
+      - name: Install Python.NET
+        shell: powershell
+        run: python -m pip install --disable-pip-version-check pythonnet
 
-          try {
-              [System.Windows.Forms.Application]::Run($form)
-              $active = $script:activeAfterShow
-              Write-Host "Form.ActiveForm after Show/Activate: $(if ($active) { 'NON-null (' + $active.Text + ')' } else { 'null' })"
-              Write-Host "Reporter's verdict would be: $(if ($active) { 'Interactive desktop session detected' } else { 'Non-interactive session detected' })"
-          } catch {
-              Write-Host "WinForms Application.Run threw: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+      - name: Reporter's EXACT demo.py (verbatim from the issue)
+        shell: powershell
+        run: |
+          $demo = @'
+          import sys
+          from pathlib import Path
+          import clr_loader
+          from pythonnet import set_runtime
+          runtime_json = Path(__file__).parent / "runtime.json"
+          runtime_json.write_text("""
+          {
+            "runtimeOptions": {
+              "tfm": "net10.0-windows",
+              "frameworks": [
+                { "name": "Microsoft.NETCore.App", "version": "10.0.0" },
+                { "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" }
+              ]
+            }
           }
+          """)
+          set_runtime(clr_loader.get_coreclr(runtime_config=runtime_json))
+          import clr
+          clr.AddReference("System.Windows.Forms")
+          import System.Windows.Forms as WinForms
+
+          def main():
+              form = WinForms.Form()
+              form.Text = "Interactive Desktop Test"
+              form.Show()
+              WinForms.Application.DoEvents()
+              form.Activate()
+              WinForms.Application.DoEvents()
+              active = WinForms.Form.ActiveForm
+              print(f"Form.Visible:         {form.Visible}")
+              print(f"Form.IsHandleCreated: {form.IsHandleCreated}")
+              print(f"Form.ActiveForm:      {active}")
+              if active is not None:
+                  print("RESULT: Interactive desktop session detected.")
+                  rc = 0
+              else:
+                  print("RESULT: Non-interactive session detected.")
+                  rc = 1
+              form.Close(); form.Dispose()
+              return rc
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          '@
+          Set-Content -Path "$env:RUNNER_TEMP\demo.py" -Value $demo -Encoding utf8
+          python "$env:RUNNER_TEMP\demo.py"
+          Write-Host "reporter demo.py exit code: $LASTEXITCODE"
+          exit 0
+
+      - name: Corrected probe - same .NET 10 stack, proper message loop
+        shell: powershell
+        run: |
+          $fix = @'
+          from pathlib import Path
+          import clr_loader
+          from pythonnet import set_runtime
+          runtime_json = Path(r"__TMP__") / "runtime2.json"
+          runtime_json.write_text("""
+          { "runtimeOptions": { "tfm": "net10.0-windows", "frameworks": [
+            { "name": "Microsoft.NETCore.App", "version": "10.0.0" },
+            { "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" } ] } }
+          """)
+          set_runtime(clr_loader.get_coreclr(runtime_config=runtime_json))
+          import clr
+          clr.AddReference("System.Windows.Forms")
+          from System import Environment
+          import System.Windows.Forms as WinForms
+
+          # (a) interactivity, measured from INSIDE the .NET 10 process
+          print(f"[.NET 10] Environment.UserInteractive: {Environment.UserInteractive}")
+
+          # (b) the reporter's check, but with a real message pump instead of Show()+DoEvents
+          result = {"active": None}
+          form = WinForms.Form()
+          form.Text = "probe"
+          def on_shown(sender, args):
+              form.Activate()
+              result["active"] = WinForms.Form.ActiveForm
+              form.Close()
+          form.Shown += on_shown
+          WinForms.Application.Run(form)
+          a = result["active"]
+          print(f"[corrected] Form.ActiveForm with a real message loop: {a}")
+          print("[corrected] => interactive session" if a is not None else "[corrected] => still null")
+          '@
+          $fix = $fix.Replace("__TMP__", $env:RUNNER_TEMP)
+          Set-Content -Path "$env:RUNNER_TEMP\fix.py" -Value $fix -Encoding utf8
+          python "$env:RUNNER_TEMP\fix.py"
+          Write-Host "corrected probe exit code: $LASTEXITCODE"
+          exit 0
