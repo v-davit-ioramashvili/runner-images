@@ -172,3 +172,94 @@ jobs:
           python "$env:RUNNER_TEMP\fix.py"
           Write-Host "corrected probe exit code: $LASTEXITCODE"
           exit 0
+
+      - name: Win32-level probe - is it WinForms or the WoA window manager?
+        shell: powershell
+        run: |
+          $w32 = @'
+          from pathlib import Path
+          import ctypes
+          from ctypes import wintypes
+          import clr_loader
+          from pythonnet import set_runtime
+          runtime_json = Path(r"__TMP__") / "runtime3.json"
+          runtime_json.write_text("""
+          { "runtimeOptions": { "tfm": "net10.0-windows", "frameworks": [
+            { "name": "Microsoft.NETCore.App", "version": "10.0.0" },
+            { "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" } ] } }
+          """)
+          set_runtime(clr_loader.get_coreclr(runtime_config=runtime_json))
+          import clr
+          clr.AddReference("System.Windows.Forms")
+          import System.Windows.Forms as WinForms
+
+          user32 = ctypes.windll.user32
+          user32.GetForegroundWindow.restype = wintypes.HWND
+          user32.GetActiveWindow.restype = wintypes.HWND
+          user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+          user32.SetForegroundWindow.restype = wintypes.BOOL
+          user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+          user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+          class RECT(ctypes.Structure):
+              _fields_ = [("l", wintypes.LONG), ("t", wintypes.LONG), ("r", wintypes.LONG), ("b", wintypes.LONG)]
+          class GTI(ctypes.Structure):
+              _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                          ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                          ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                          ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rc", RECT)]
+          user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GTI)]
+          user32.GetGUIThreadInfo.restype = wintypes.BOOL
+
+          r = {}
+          form = WinForms.Form()
+          form.Text = "win32probe"
+          def on_shown(sender, args):
+              form.Activate()
+              hwnd = form.Handle.ToInt64()
+              r["hwnd"] = hwnd
+              r["fg"] = user32.GetForegroundWindow()
+              r["act"] = user32.GetActiveWindow()
+              r["sfw_ret"] = user32.SetForegroundWindow(wintypes.HWND(hwnd))
+              r["fg2"] = user32.GetForegroundWindow()
+              r["act2"] = user32.GetActiveWindow()
+              tid = user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), None)
+              g = GTI(); g.cbSize = ctypes.sizeof(GTI)
+              r["gti_ok"] = user32.GetGUIThreadInfo(tid, ctypes.byref(g))
+              r["gti_active"] = g.hwndActive
+              r["gti_focus"] = g.hwndFocus
+              r["activeform_null"] = (WinForms.Form.ActiveForm is None)
+              form.Close()
+          form.Shown += on_shown
+          WinForms.Application.Run(form)
+
+          def hx(v):
+              return "0/None" if not v else hex(int(v))
+          print(f"[win32] form HWND                 : {hx(r.get('hwnd'))}")
+          print(f"[win32] GetForegroundWindow       : {hx(r.get('fg'))}")
+          print(f"[win32] GetActiveWindow (thread)  : {hx(r.get('act'))}")
+          print(f"[win32] SetForegroundWindow ret   : {r.get('sfw_ret')}")
+          print(f"[win32] GetForegroundWindow after : {hx(r.get('fg2'))}")
+          print(f"[win32] GetActiveWindow  after    : {hx(r.get('act2'))}")
+          print(f"[win32] GetGUIThreadInfo ok       : {r.get('gti_ok')}")
+          print(f"[win32] GUIThreadInfo.hwndActive  : {hx(r.get('gti_active'))}")
+          print(f"[win32] GUIThreadInfo.hwndFocus   : {hx(r.get('gti_focus'))}")
+          print(f"[win32] WinForms ActiveForm null  : {r.get('activeform_null')}")
+          hwnd = r.get("hwnd")
+          fg_is_ours = bool(r.get("fg")) and int(r.get("fg")) == hwnd
+          act_is_ours = (bool(r.get("act")) and int(r.get("act")) == hwnd) or \
+                        (bool(r.get("gti_active")) and int(r.get("gti_active")) == hwnd)
+          print(f"[verdict] OS foreground IS our window     : {fg_is_ours}")
+          print(f"[verdict] OS thread-active IS our window  : {act_is_ours}")
+          if not act_is_ours:
+              print("[verdict] => Win32 itself reports no active window => WoA window-manager layer")
+          elif r.get("activeform_null"):
+              print("[verdict] => Win32 active OK but WinForms.ActiveForm null => dotnet/winforms")
+          else:
+              print("[verdict] => both agree there is an active window")
+          '@
+          $w32 = $w32.Replace("__TMP__", $env:RUNNER_TEMP)
+          Set-Content -Path "$env:RUNNER_TEMP\win32probe.py" -Value $w32 -Encoding utf8
+          python "$env:RUNNER_TEMP\win32probe.py"
+          Write-Host "win32 probe exit code: $LASTEXITCODE"
+          exit 0
