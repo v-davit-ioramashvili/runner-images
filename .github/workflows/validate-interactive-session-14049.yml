@@ -60,11 +60,15 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          $root = "$env:RUNNER_TEMP\dotnet"
           Invoke-WebRequest "https://dot.net/v1/dotnet-install.ps1" -OutFile "$env:RUNNER_TEMP\dotnet-install.ps1"
-          & "$env:RUNNER_TEMP\dotnet-install.ps1" -Runtime windowsdesktop -Channel 10.0 -InstallDir "$env:RUNNER_TEMP\dotnet"
-          "DOTNET_ROOT=$env:RUNNER_TEMP\dotnet" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Installed WindowsDesktop runtimes:"
-          & "$env:RUNNER_TEMP\dotnet\dotnet.exe" --list-runtimes | Select-String "WindowsDesktop"
+          # base runtime (brings the host + dotnet.exe muxer + Microsoft.NETCore.App)
+          & "$env:RUNNER_TEMP\dotnet-install.ps1" -Runtime dotnet -Channel 10.0 -InstallDir $root
+          # WindowsDesktop shared framework on top, same root
+          & "$env:RUNNER_TEMP\dotnet-install.ps1" -Runtime windowsdesktop -Channel 10.0 -InstallDir $root
+          "DOTNET_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Installed runtimes:"
+          & "$root\dotnet.exe" --list-runtimes
 
       - uses: actions/setup-python@v5
         with:
