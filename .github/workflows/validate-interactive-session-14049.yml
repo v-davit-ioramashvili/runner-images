@@ -263,3 +263,87 @@ jobs:
           python "$env:RUNNER_TEMP\win32probe.py"
           Write-Host "win32 probe exit code: $LASTEXITCODE"
           exit 0
+
+      - name: Can WE fix it? - try every foreground-forcing lever
+        shell: powershell
+        run: |
+          $mit = @'
+          from pathlib import Path
+          import ctypes
+          from ctypes import wintypes
+          import clr_loader
+          from pythonnet import set_runtime
+          runtime_json = Path(r"__TMP__") / "runtime4.json"
+          runtime_json.write_text("""
+          { "runtimeOptions": { "tfm": "net10.0-windows", "frameworks": [
+            { "name": "Microsoft.NETCore.App", "version": "10.0.0" },
+            { "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" } ] } }
+          """)
+          set_runtime(clr_loader.get_coreclr(runtime_config=runtime_json))
+          import clr
+          clr.AddReference("System.Windows.Forms")
+          import System.Windows.Forms as WinForms
+
+          user32 = ctypes.windll.user32
+          kernel32 = ctypes.windll.kernel32
+          user32.GetForegroundWindow.restype = wintypes.HWND
+          user32.SetForegroundWindow.argtypes = [wintypes.HWND]; user32.SetForegroundWindow.restype = wintypes.BOOL
+          user32.BringWindowToTop.argtypes = [wintypes.HWND]; user32.BringWindowToTop.restype = wintypes.BOOL
+          user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]; user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+          user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]; user32.AttachThreadInput.restype = wintypes.BOOL
+          user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]; user32.SystemParametersInfoW.restype = wintypes.BOOL
+          kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+          SPI_GET, SPI_SET, SENDCHANGE = 0x2000, 0x2001, 0x2
+
+          def get_lock():
+              v = wintypes.DWORD(0)
+              user32.SystemParametersInfoW(SPI_GET, 0, ctypes.cast(ctypes.byref(v), ctypes.c_void_p), 0)
+              return v.value
+
+          lock_before = get_lock()
+          # LEVER 1: drop the foreground lock timeout to 0 (this is the one thing an IMAGE could bake in)
+          set_ok = user32.SystemParametersInfoW(SPI_SET, 0, ctypes.c_void_p(0), SENDCHANGE)
+          lock_after = get_lock()
+
+          r = {}
+          form = WinForms.Form()
+          form.Text = "mitigation"
+          def on_shown(sender, args):
+              hwnd = form.Handle.ToInt64()
+              fg = user32.GetForegroundWindow()
+              fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+              cur = kernel32.GetCurrentThreadId()
+              # LEVER 2: AttachThreadInput to the foreground thread (classic SetForegroundWindow unlock)
+              attached = user32.AttachThreadInput(cur, fg_tid, True) if (fg_tid and fg_tid != cur) else 0
+              # LEVER 3: TopMost + BringWindowToTop + Activate + SetForegroundWindow
+              form.TopMost = True
+              user32.BringWindowToTop(wintypes.HWND(hwnd))
+              form.Activate()
+              r["sfw"] = user32.SetForegroundWindow(wintypes.HWND(hwnd))
+              if attached:
+                  user32.AttachThreadInput(cur, fg_tid, False)
+              r["hwnd"] = hwnd
+              r["fg_after"] = user32.GetForegroundWindow()
+              r["attached"] = bool(attached)
+              r["activeform_null"] = (WinForms.Form.ActiveForm is None)
+              form.Close()
+          form.Shown += on_shown
+          WinForms.Application.Run(form)
+
+          def hx(v): return "0/None" if not v else hex(int(v))
+          print(f"[mitig] ForegroundLockTimeout before : {lock_before}")
+          print(f"[mitig] SPI_SET lock->0 succeeded    : {bool(set_ok)}")
+          print(f"[mitig] ForegroundLockTimeout after  : {lock_after}")
+          print(f"[mitig] AttachThreadInput used       : {r.get('attached')}")
+          print(f"[mitig] SetForegroundWindow ret      : {r.get('sfw')}")
+          print(f"[mitig] foreground now OUR window     : {bool(r.get('fg_after')) and int(r.get('fg_after')) == r.get('hwnd')}   (fg={hx(r.get('fg_after'))}, ours={hx(r.get('hwnd'))})")
+          print(f"[mitig] WinForms ActiveForm null      : {r.get('activeform_null')}")
+          fixed = (bool(r.get('fg_after')) and int(r.get('fg_after')) == r.get('hwnd')) and not r.get('activeform_null')
+          print(f"[VERDICT] a runtime/image-side lever FIXED it: {fixed}")
+          print("[VERDICT] => there is nothing on our side" if not fixed else "[VERDICT] => a workaround EXISTS - revisit the 'nothing we can do' claim")
+          '@
+          $mit = $mit.Replace("__TMP__", $env:RUNNER_TEMP)
+          Set-Content -Path "$env:RUNNER_TEMP\mitig.py" -Value $mit -Encoding utf8
+          python "$env:RUNNER_TEMP\mitig.py"
+          Write-Host "mitigation probe exit code: $LASTEXITCODE"
+          exit 0
