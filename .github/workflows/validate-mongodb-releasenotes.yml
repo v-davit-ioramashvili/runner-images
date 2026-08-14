@@ -20,6 +20,11 @@ jobs:
         include:
           - runner: windows-2025
             toolset: toolset-2025.json
+          # There is no hosted vs2026 runner label. The vs2026 image is Windows Server 2025
+          # with a different toolset, so run the vs2026 toolset on the windows-2025 runner:
+          # that is the exact OS + exact toolset the vs2026 build feeds to this script.
+          - runner: windows-2025
+            toolset: toolset-2025-vs2026.json
           - runner: windows-2022
             toolset: toolset-2022.json
 
