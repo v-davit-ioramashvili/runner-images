@@ -1,0 +1,134 @@
+# TEMPORARY - validation aid for the MongoDB release-notes URL/parser fix.
+# Reproduces the 308 on the old URL, then runs the REAL Install-MongoDB.ps1 parser
+# (via the real InstallHelpers.ps1 + real toolset.json) on the actual windows-2025 /
+# windows-2022 runners, and validates the resolved MSI with the REAL Test-FileSignature.
+# Delete this file before opening the PR.
+
+name: Validate MongoDB release-notes fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/mongodb*'
+
+jobs:
+  mongodb:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            toolset: toolset-2025.json
+          - runner: windows-2022
+            toolset: toolset-2022.json
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Environment baseline
+        shell: powershell
+        run: |
+          "PSVersion : $($PSVersionTable.PSVersion)"
+          "PSEdition : $($PSVersionTable.PSEdition)"
+          "--- MongoDB already on this image (from the last good build) ---"
+          try { (& mongod --version)[0..2] } catch { "mongod not on PATH: $_" }
+
+      - name: Reproduce the reported failure on the old URL
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $old = "mongodb.com/docs/v7.0/release-notes/7.0/"
+          try {
+            $null = Invoke-WebRequest -Uri $old -UseBasicParsing -ErrorAction Stop
+            "UNEXPECTED: old URL succeeded - the 308 may have been reverted upstream"
+          } catch {
+            "EXPECTED FAILURE on old URL: $($_.Exception.Message)"
+          }
+
+          $new = "https://www.mongodb.com/docs/v7.0/release-notes/7.0"
+          $r = Invoke-WebRequest -Uri $new -UseBasicParsing -MaximumRedirection 0
+          "NEW URL status: $($r.StatusCode) (no redirect followed)"
+
+      - name: Run the REAL parser from Install-MongoDB.ps1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Stand up IMAGE_FOLDER exactly as the packer build does, so Get-ToolsetContent works
+          $imageFolder = Join-Path $env:RUNNER_TEMP 'image'
+          New-Item -ItemType Directory -Force -Path $imageFolder | Out-Null
+          Copy-Item "images\windows\toolsets\${{ matrix.toolset }}" (Join-Path $imageFolder 'toolset.json') -Force
+          $env:IMAGE_FOLDER = $imageFolder
+
+          . images\windows\scripts\helpers\InstallHelpers.ps1
+
+          "toolset pins MongoDB: $((Get-ToolsetContent).mongodb.version)"
+
+          # Execute the real script verbatim, stopping right before Install-Binary
+          $src  = Get-Content 'images\windows\scripts\build\Install-MongoDB.ps1' -Raw
+          $head = $src.Substring(0, $src.IndexOf('Install-Binary'))
+          . ([scriptblock]::Create($head))
+
+          if (-not $latestVersion) { throw "parser produced no version" }
+          "RESOLVED VERSION: $latestVersion"
+
+          $msi = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-$latestVersion-signed.msi"
+          "MSI URL: $msi"
+          "latestVersion=$latestVersion"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "msiUrl=$msi"                   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Validate the MSI with the REAL Test-FileSignature
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . images\windows\scripts\helpers\InstallHelpers.ps1
+
+          $env:TEMP_DIR = $env:RUNNER_TEMP
+          $path = Invoke-DownloadWithRetry -Url "$env:msiUrl" -Path "$env:RUNNER_TEMP\mongodb.msi"
+          "downloaded: $((Get-Item $path).Length) bytes"
+
+          $sig = Get-AuthenticodeSignature $path
+          "Status  : $($sig.Status)"
+          "Subject : $($sig.SignerCertificate.Subject)"
+          "NotAfter: $($sig.SignerCertificate.NotAfter)"
+          "EKU     : $($sig.SignerCertificate.EnhancedKeyUsageList.FriendlyName -join ', ')"
+
+          # This is the exact assertion Install-MongoDB.ps1 makes
+          Test-FileSignature -Path $path -ExpectedSubject 'CN="MONGODB, INC.", O="MONGODB, INC.", L=New York, S=New York, C=US'
+          "SIGNATURE CHECK PASSED - matches the ExpectedSubject in Install-MongoDB.ps1"
+
+      - name: Install the resolved MSI and verify the version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = "$env:RUNNER_TEMP\mongodb.msi"
+
+          # Same args Install-MongoDB.ps1 passes through Install-Binary
+          $p = Start-Process -FilePath msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', $msi, '/qn', '/norestart',
+            'TARGETDIR=C:\PROGRA~1\MongoDB', 'ADDLOCAL=ALL',
+            '/l*v', "$env:RUNNER_TEMP\mongo-install.log"
+          )
+          "msiexec exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Get-Content "$env:RUNNER_TEMP\mongo-install.log" -Tail 60
+            throw "MSI install failed with exit code $($p.ExitCode)"
+          }
+
+          # Resolve mongod the way the script does, via the service path
+          $mongoPath = (Get-CimInstance Win32_Service -Filter "Name LIKE 'mongodb'").PathName
+          $mongoBin  = Split-Path -Path $mongoPath.split('"')[1]
+          "mongoBin: $mongoBin"
+
+          $reported = (& "$mongoBin\mongod.exe" --version)[0]
+          "mongod reports: $reported"
+
+          # The assertion Databases.Tests.ps1 makes: version starts with the toolset value
+          if ($reported -notmatch [regex]::Escape("$env:latestVersion")) {
+            throw "mongod reports '$reported' which does not contain the resolved $env:latestVersion"
+          }
+          "INSTALL VERIFIED - mongod is $env:latestVersion"
