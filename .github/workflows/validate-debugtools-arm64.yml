@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Confirm arch, that the 26100 SDK is present, and that cdb.exe is absent today
+      - name: Record arch, SDK, and per-arch Debuggers state BEFORE the fix
         shell: pwsh
         run: |
           Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
@@ -40,15 +40,14 @@ jobs:
           }
           Write-Host "OK - SDK 10.0.26100 present (matches the issue)"
 
-          $cdbArm = "$kitsRoot\Debuggers\arm64\cdb.exe"
-          $cdbX64 = "$kitsRoot\Debuggers\x64\cdb.exe"
-          Write-Host "--- Debuggers before ---"
-          Write-Host "  arm64 cdb.exe : $(Test-Path $cdbArm)"
-          Write-Host "  x64   cdb.exe : $(Test-Path $cdbX64)"
-          if ((Test-Path $cdbArm) -or (Test-Path $cdbX64)) {
-            Write-Error "Debugging Tools already present - unexpected on the current image"; exit 1
+          # Per-arch cdb.exe state BEFORE. On the current image arm64 ships but x64 does not.
+          Write-Host "--- Debuggers per-arch BEFORE ---"
+          foreach ($arch in @("x86","x64","arm","arm64")) {
+            $present = Test-Path "$kitsRoot\Debuggers\$arch\cdb.exe"
+            Write-Host "  $arch cdb.exe : $present"
+            "BEFORE_$arch=$present" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
-          Write-Host "OK - Debugging Tools for Windows are NOT installed (matches #14061)"
+          # x64 is the gap the reporter's Chromium build hits; do NOT fail here, we install it below.
 
       - name: Diagnose where the SDK bundle lives on ARM64 (the BundleCachePath lookup)
         shell: pwsh
@@ -129,18 +128,24 @@ jobs:
           Write-Host "--- Debuggers after ---"
           Get-ChildItem "$kitsRoot\Debuggers" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  arch dir: $($_.Name)" }
 
-          $cdbArm = "$kitsRoot\Debuggers\arm64\cdb.exe"
+          Write-Host "--- Debuggers per-arch AFTER ---"
+          foreach ($arch in @("x86","x64","arm","arm64")) {
+            $present = Test-Path "$kitsRoot\Debuggers\$arch\cdb.exe"
+            Write-Host "  $arch cdb.exe : $present"
+          }
+
           $cdbX64 = "$kitsRoot\Debuggers\x64\cdb.exe"
-          foreach ($cdb in @($cdbArm, $cdbX64)) {
+          $cdbArm = "$kitsRoot\Debuggers\arm64\cdb.exe"
+          foreach ($cdb in @($cdbX64, $cdbArm)) {
             if (Test-Path $cdb) {
               Write-Host "found: $cdb"
               & $cdb -version 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
-            } else {
-              Write-Host "MISSING: $cdb"
             }
           }
-          if (-not (Test-Path $cdbArm)) { Write-Error "arm64 cdb.exe missing after install"; exit 1 }
-          Write-Host "OK - arm64 cdb.exe installed"
+          # x64 is the arch that was MISSING before; the fix must add it.
+          if (-not (Test-Path $cdbX64)) { Write-Error "x64 cdb.exe still missing after install - the fix did not close the gap"; exit 1 }
+          if (-not (Test-Path $cdbArm)) { Write-Error "arm64 cdb.exe went missing after install"; exit 1 }
+          Write-Host "OK - x64 cdb.exe now installed (arm64 still present)"
 
       - name: Reproduce the issue check (Chromium gn / vs_toolchain.py)
         shell: pwsh
@@ -162,7 +167,9 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $cdbArm = Test-Path "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\cdb.exe"
+          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
+          $x64After = Test-Path "$kitsRoot\Debuggers\x64\cdb.exe"
+          $armAfter = Test-Path "$kitsRoot\Debuggers\arm64\cdb.exe"
           $rows = @(
             "### Debugging Tools for Windows - ARM64 validation",
             "",
@@ -170,8 +177,10 @@ jobs:
             "| --- | --- |",
             "| Runner | windows-11-arm |",
             "| SDK present | 10.0.26100 |",
-            "| CDB present *before* fix | No (as reported in #14061) |",
-            "| arm64 cdb.exe *after* fix | $(if ($cdbArm) {'installed'} else {'FAILED'}) |",
+            "| arm64 cdb.exe *before* fix | $($env:BEFORE_arm64) (already shipped) |",
+            "| x64 cdb.exe *before* fix | $($env:BEFORE_x64) (the gap #14061 hits) |",
+            "| x64 cdb.exe *after* fix | $(if ($x64After) {'installed'} else {'FAILED'}) |",
+            "| arm64 cdb.exe *after* fix | $(if ($armAfter) {'present'} else {'FAILED'}) |",
             "| Install time | $($env:INSTALL_SECONDS)s |",
             "| Disk delta (whole C:) | $($env:DISK_DELTA_MIB) MiB |",
             "| Debuggers folder size | $($env:DBG_FOLDER_MIB) MiB |"
