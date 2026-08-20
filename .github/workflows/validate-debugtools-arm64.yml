@@ -1,10 +1,8 @@
 # TEMPORARY - validation aid for #14061.
-# Runs on the hosted windows-11-arm runner (current production image, i.e. BEFORE the
-# fix). Confirms the "Debugging Tools for Windows" (cdb.exe) feature of the 26100 SDK
-# is absent today, dumps where the SDK bundle actually lives on ARM64 (the lookup that
-# Sergei hit trouble with), then runs the EXACT production block from
-# Install-VisualStudio.ps1 via the repo's Install-Binary, measures the on-disk cost and
-# install time, and reproduces the Chromium gn/vs_toolchain.py check from the issue.
+# End-to-end proof on the hosted windows-11-arm runner: drives Chromium's REAL
+# build/vs_toolchain.py (_CopyDebugger) - the exact code that emits the reporter's
+# "Debugging Tools for Windows" error. Shows it RAISES that error for x64 before the
+# fix, then PASSES after copying the SDK's own x64 dbghelp.dll into Debuggers\x64.
 # Delete this file before opening the PR.
 
 name: Validate Debugging Tools ARM64
@@ -20,165 +18,110 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 30
 
+    env:
+      KITS_ROOT: 'C:\Program Files (x86)\Windows Kits\10'
+
     steps:
       - uses: actions/checkout@v5
 
-      - name: Record arch, SDK, and per-arch Debuggers state BEFORE the fix
+      - name: Environment + confirm x64 debuggers absent today
         shell: pwsh
         run: |
           Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
-          $osa = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
-          Write-Host "OSArchitecture         = $osa"
-          if ($osa -notmatch "ARM 64-bit") { Write-Error "not an arm64 runner"; exit 1 }
+          (Get-CimInstance Win32_OperatingSystem).OSArchitecture
+          python --version
+          Write-Host "x64  dbghelp present: $(Test-Path "$env:KITS_ROOT\Debuggers\x64\dbghelp.dll")"
+          Write-Host "arm64 dbghelp present: $(Test-Path "$env:KITS_ROOT\Debuggers\arm64\dbghelp.dll")"
 
-          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          Write-Host "--- installed SDK versions under $kitsRoot\bin ---"
-          Get-ChildItem "$kitsRoot\bin" -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^10\.' } | ForEach-Object { Write-Host "  $($_.Name)" }
-          if (-not (Test-Path "$kitsRoot\bin\10.0.26100.0")) {
-            Write-Error "Windows 11 SDK 10.0.26100 not present - unexpected on this image"; exit 1
-          }
-          Write-Host "OK - SDK 10.0.26100 present (matches the issue)"
-
-          # Per-arch cdb.exe state BEFORE. On the current image arm64 ships but x64 does not.
-          Write-Host "--- Debuggers per-arch BEFORE ---"
-          foreach ($arch in @("x86","x64","arm","arm64")) {
-            $present = Test-Path "$kitsRoot\Debuggers\$arch\cdb.exe"
-            Write-Host "  $arch cdb.exe : $present"
-            "BEFORE_$arch=$present" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
-          # x64 is the gap the reporter's Chromium build hits; do NOT fail here, we install it below.
-
-      - name: Diagnose where the SDK bundle lives on ARM64 (the BundleCachePath lookup)
+      - name: Fetch Chromium's real vs_toolchain.py + gn_helpers.py, write harness
         shell: pwsh
         run: |
-          Write-Host "--- 32-bit view: HKLM\Software\Wow6432Node\...\Uninstall (production lookup) ---"
-          Get-ItemProperty 'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -match 'Windows Software Development Kit' } |
-            Select-Object DisplayName, DisplayVersion, BundleCachePath | Format-List
-
-          Write-Host "--- 64-bit view: HKLM\Software\...\Uninstall (fallback, in case arm64 differs) ---"
-          Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -match 'Windows Software Development Kit' } |
-            Select-Object DisplayName, DisplayVersion, BundleCachePath | Format-List
-
-          Write-Host "--- any winsdksetup.exe cached under Package Cache ---"
-          Get-ChildItem 'C:\ProgramData\Package Cache' -Recurse -Filter 'winsdksetup.exe' -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-
-      - name: Measure disk before
-        shell: pwsh
-        run: |
-          $used = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").Size - (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace
-          Write-Host "used bytes before: $used"
-          "DISK_BEFORE=$used" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # Candidate fix (no download): the SDK's own x64 DbgHelp.dll already ships under
-      # Windows Kits\10\bin\<ver>\x64. Chromium reads from Debuggers\x64, which is empty.
-      # Copy the SDK bin x64 debugger DLLs into Debuggers\x64. dbghelp.dll is the only file
-      # Chromium hard-requires; dbgcore.dll / symsrv.dll are optional (copied if present).
-      - name: Populate Debuggers\x64 from the SDK's bin\x64 (copy-based fix)
-        shell: pwsh
-        run: |
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          $sdkVer   = "10.0.26100.0"
-          $srcDir   = "$kitsRoot\bin\$sdkVer\x64"
-          $dstDir   = "$kitsRoot\Debuggers\x64"
-          New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
-
-          # DbgHelp.dll is on-disk as mixed-case; Chromium looks up 'dbghelp.dll' (Windows FS
-          # is case-insensitive so this is fine). Copy the three files Chromium may want.
-          $copied = @()
-          foreach ($f in @("dbghelp.dll","dbgcore.dll","symsrv.dll")) {
-            $src = Join-Path $srcDir $f
-            if (Test-Path $src) {
-              Copy-Item $src (Join-Path $dstDir $f) -Force
-              $copied += "$f ($((Get-Item $src).VersionInfo.FileVersion))"
-            } else {
-              Write-Host "  not present in bin\x64: $f"
-            }
+          $dir = Join-Path $env:RUNNER_TEMP "chromium-build"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          foreach ($f in @("vs_toolchain.py","gn_helpers.py")) {
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri "https://raw.githubusercontent.com/chromium/chromium/main/build/$f" `
+              -OutFile (Join-Path $dir $f)
           }
-          Write-Host "copied into Debuggers\x64: $($copied -join '; ')"
+          Write-Host "downloaded:"; Get-ChildItem $dir | ForEach-Object { Write-Host "  $($_.Name)" }
+          "CHROMIUM_BUILD_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $sw.Stop()
-          "INSTALL_SECONDS=$([int]$sw.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "copy took $($sw.Elapsed.TotalMilliseconds) ms"
+          # Harness: call Chromium's real _CopyDebugger(target_dir, target_cpu).
+          # exit 0 = passed (no raise); exit 42 = raised (prints the exception).
+          $harness = @'
+import os, sys, tempfile
+sdk = r"C:\Program Files (x86)\Windows Kits\10"
+os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"     # use installed toolchain, no win_toolchain.json
+os.environ["WINDOWSSDKDIR"] = sdk
+os.environ.setdefault("GYP_MSVS_OVERRIDE_PATH", sdk)  # msdia140 copy is optional; any existing dir
+sys.path.insert(0, sys.argv[1])
+target_cpu = sys.argv[2]
+import vs_toolchain
+target = tempfile.mkdtemp()
+try:
+    vs_toolchain._CopyDebugger(target, target_cpu)
+except Exception as e:
+    print("RAISED: " + repr(e))
+    sys.exit(42)
+print("PASSED: _CopyDebugger(%s) did not raise; dbghelp copied=%s"
+      % (target_cpu, os.path.exists(os.path.join(target, "dbghelp.dll"))))
+sys.exit(0)
+'@
+          Set-Content -Path (Join-Path $dir "run_check.py") -Value $harness -Encoding utf8
 
-      - name: Measure the on-disk cost
+      - name: BEFORE fix - arm64 target should already PASS
         shell: pwsh
         run: |
-          $used = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").Size - (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace
-          $delta = $used - [int64]$env:DISK_BEFORE
-          $deltaMiB = [math]::Round($delta / 1MB, 1)
-          Write-Host "disk delta: $deltaMiB MiB"
-          "DISK_DELTA_MIB=$deltaMiB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" arm64 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) { Write-Error "arm64 unexpectedly failed (exit $code) - our model is wrong"; exit 1 }
+          Write-Host "OK - arm64 target passes on the current image (as expected)"
 
-          $dbgRoot = "C:\Program Files (x86)\Windows Kits\10\Debuggers"
-          if (Test-Path $dbgRoot) {
-            $folderBytes = (Get-ChildItem $dbgRoot -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-            $folderMiB = [math]::Round($folderBytes / 1MB, 1)
-            Write-Host "Debuggers folder size: $folderMiB MiB"
-            "DBG_FOLDER_MIB=$folderMiB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
-
-      - name: Verify the files Chromium's vs_toolchain.py ACTUALLY requires (dbghelp/dbgcore)
+      - name: BEFORE fix - x64 target must RAISE the reporter's exact error
         shell: pwsh
         run: |
-          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          $x64dir = "$kitsRoot\Debuggers\x64"
+          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" x64 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 42) { Write-Error "Expected x64 to RAISE before the fix, but exit was $code - did not reproduce"; exit 1 }
+          if ($out -notmatch "Debugging Tools for Windows") { Write-Error "Raised, but not the expected 'Debugging Tools for Windows' error"; exit 1 }
+          Write-Host "OK - reproduced the reporter's exact error with Chromium's real code"
 
-          Write-Host "--- full contents of Debuggers\x64 after the copy ---"
-          if (Test-Path $x64dir) {
-            Get-ChildItem $x64dir -File -ErrorAction SilentlyContinue | Select-Object Name,@{n='KB';e={[int]($_.Length/1KB)}} | Format-Table -AutoSize | Out-String | Write-Host
-          } else { Write-Host "  (Debuggers\x64 does not exist)" }
-
-          # dbghelp.dll is the ONLY file Chromium hard-requires (raises if missing);
-          # dbgcore.dll and symsrv.dll are optional (skipped if absent).
-          Write-Host "--- Chromium files per arch (x64 dbghelp is mandatory) ---"
-          foreach ($arch in @("x64","arm64")) {
-            foreach ($f in @("dbghelp.dll","dbgcore.dll","symsrv.dll")) {
-              Write-Host "  $arch\$f : $(Test-Path "$kitsRoot\Debuggers\$arch\$f")"
-            }
-          }
-          $x64dbghelp = "$kitsRoot\Debuggers\x64\dbghelp.dll"
-          if (-not (Test-Path $x64dbghelp)) { Write-Error "MANDATORY x64 dbghelp.dll still missing - fix failed"; exit 1 }
-          Write-Host "OK - Debuggers\x64\dbghelp.dll present ($((Get-Item $x64dbghelp).VersionInfo.FileVersion)) -> Chromium's mandatory check passes"
-
-      - name: Reproduce the issue check (Chromium gn / vs_toolchain.py)
+      - name: Apply the fix - copy SDK bin\x64\DbgHelp.dll into Debuggers\x64
         shell: pwsh
         run: |
-          # vs_toolchain.py's _CopyDebugger raises "You must install ... 'Debugging Tools
-          # for Windows' feature" when Debuggers\<target_cpu>\dbghelp.dll is absent.
-          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          # The arm64 build copies debuggers for BOTH arm64 and its win_clang_x64 host -> it
-          # needs Debuggers\x64\dbghelp.dll AND Debuggers\arm64\dbghelp.dll. Both mandatory.
-          $ok = $true
-          foreach ($p in @("$kitsRoot\Debuggers\x64\dbghelp.dll","$kitsRoot\Debuggers\arm64\dbghelp.dll")) {
-            $present = Test-Path $p
-            Write-Host "  $p : $present"
-            if (-not $present) { $ok = $false }
-          }
-          if (-not $ok) { Write-Error "Chromium's Debugging Tools check would still fail"; exit 1 }
-          Write-Host "OK - both arm64 and x64 dbghelp.dll present -> an arm64 Chromium build passes the check"
+          $src = Get-ChildItem "$env:KITS_ROOT\bin\*\x64\dbghelp.dll" -ErrorAction SilentlyContinue |
+                 Sort-Object { $_.VersionInfo.FileVersionRaw } -Descending | Select-Object -First 1
+          if (-not $src) { Write-Error "no x64 dbghelp.dll under SDK bin - cannot apply fix"; exit 1 }
+          $dst = "$env:KITS_ROOT\Debuggers\x64"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item $src.FullName (Join-Path $dst "dbghelp.dll") -Force
+          Write-Host "copied $($src.FullName) ($($src.VersionInfo.FileVersion)) -> $dst\dbghelp.dll"
+
+      - name: AFTER fix - x64 target must now PASS (Chromium's real code)
+        shell: pwsh
+        run: |
+          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" x64 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) { Write-Error "x64 still fails AFTER the fix (exit $code) - fix did NOT work"; exit 1 }
+          Write-Host "OK - x64 target passes after the fix -> the reporter's build is unblocked"
 
       - name: Summary
         if: always()
         shell: pwsh
         run: |
-          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          $x64After = Test-Path "$kitsRoot\Debuggers\x64\dbghelp.dll"
-          $rows = @(
-            "### Debugging Tools for Windows - ARM64 validation (copy-based fix)",
+          $x64 = Test-Path "$env:KITS_ROOT\Debuggers\x64\dbghelp.dll"
+          @(
+            "### #14061 end-to-end validation (Chromium vs_toolchain.py)",
             "",
-            "| Metric | Value |",
+            "| Check | Result |",
             "| --- | --- |",
             "| Runner | windows-11-arm |",
-            "| SDK present | 10.0.26100 |",
-            "| Fix | copy SDK bin\x64\DbgHelp.dll -> Debuggers\x64\dbghelp.dll |",
-            "| x64 Debuggers\\dbghelp.dll *before* | False (the gap #14061 hits) |",
-            "| x64 Debuggers\\dbghelp.dll *after*  | $(if ($x64After) {'present'} else {'FAILED'}) |",
-            "| Fix time | $($env:INSTALL_SECONDS)s (file copy) |",
-            "| Disk delta (whole C:) | $($env:DISK_DELTA_MIB) MiB |"
-          )
-          $rows -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            "| arm64 target (before fix) | passes |",
+            "| x64 target (before fix) | RAISES 'Debugging Tools for Windows' (reporter's error) |",
+            "| Fix | copy SDK bin\x64 dbghelp.dll -> Debuggers\x64 |",
+            "| x64 target (after fix) | passes |",
+            "| x64 Debuggers\\dbghelp.dll now present | $x64 |"
+          ) -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
