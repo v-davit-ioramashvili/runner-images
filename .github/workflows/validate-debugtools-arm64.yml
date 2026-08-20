@@ -132,50 +132,48 @@ jobs:
             "DBG_FOLDER_MIB=$folderMiB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
 
-      - name: Locate where the x64 debuggers actually landed (disk-wide, non-fatal)
+      - name: Verify the files Chromium's vs_toolchain.py ACTUALLY requires (dbghelp/dbgcore)
         shell: pwsh
         run: |
           $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          Write-Host "--- Debuggers per-arch in the x86 KitsRoot (what Chromium reads) ---"
-          foreach ($arch in @("x86","x64","arm","arm64")) {
-            Write-Host "  $arch cdb.exe : $(Test-Path "$kitsRoot\Debuggers\$arch\cdb.exe")"
-          }
+          $x64dir = "$kitsRoot\Debuggers\x64"
 
-          Write-Host "--- EVERY cdb.exe on disk (to find where the x64 MSI put it) ---"
-          foreach ($root in @("C:\Program Files\Windows Kits","C:\Program Files (x86)\Windows Kits")) {
-            if (Test-Path $root) {
-              Get-ChildItem $root -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host "  $($_.FullName)" }
+          Write-Host "--- full contents of Debuggers\x64 (what the x64 MSI installed) ---"
+          if (Test-Path $x64dir) {
+            Get-ChildItem $x64dir -File -ErrorAction SilentlyContinue | Select-Object Name,@{n='KB';e={[int]($_.Length/1KB)}} | Format-Table -AutoSize | Out-String | Write-Host
+          } else { Write-Host "  (Debuggers\x64 does not exist)" }
+
+          # Chromium's _CopyDebugger requires these two DLLs (NOT cdb.exe) for the target cpu.
+          $required = @("dbghelp.dll","dbgcore.dll")
+          Write-Host "--- Chromium-required files, per arch ---"
+          $ok = $true
+          foreach ($arch in @("x64","arm64")) {
+            foreach ($f in $required) {
+              $p = "$kitsRoot\Debuggers\$arch\$f"
+              $present = Test-Path $p
+              Write-Host "  $arch\$f : $present"
+              if ($arch -eq "x64" -and -not $present) { $ok = $false }
             }
           }
-
-          Write-Host "--- registry KitsRoot values ---"
-          $rk = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue
-          if ($rk) { $rk.PSObject.Properties | Where-Object { $_.Name -match 'KitsRoot' } | ForEach-Object { Write-Host "  $($_.Name) = $($_.Value)" } }
-
-          Write-Host "--- newest large dirs under both Program Files 'Windows Kits' Debuggers ---"
-          foreach ($dbg in @("C:\Program Files\Windows Kits\10\Debuggers","C:\Program Files (x86)\Windows Kits\10\Debuggers")) {
-            if (Test-Path $dbg) {
-              $sz = [math]::Round(((Get-ChildItem $dbg -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum)/1MB,1)
-              Write-Host "  $dbg  =>  $sz MiB ; arch dirs: $((Get-ChildItem $dbg -Directory -EA SilentlyContinue).Name -join ', ')"
-            }
-          }
+          if (-not $ok) { Write-Error "x64 dbghelp.dll/dbgcore.dll still missing - Chromium build would still fail"; exit 1 }
+          Write-Host "OK - Debuggers\x64\dbghelp.dll + dbgcore.dll present -> Chromium's check passes"
 
       - name: Reproduce the issue check (Chromium gn / vs_toolchain.py)
         shell: pwsh
         run: |
-          # vs_toolchain.py errors "You must install ... including the 'Debugging Tools
-          # for Windows' feature" when the Debuggers dir for the target arch is absent.
+          # vs_toolchain.py's _CopyDebugger raises "You must install ... 'Debugging Tools
+          # for Windows' feature" when Debuggers\<target_cpu>\dbghelp.dll is absent.
           $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          $need = @("$kitsRoot\Debuggers\x64", "$kitsRoot\Debuggers\arm64")
           $ok = $true
-          foreach ($d in $need) {
-            $present = Test-Path "$d\cdb.exe"
-            Write-Host "  $d\cdb.exe : $present"
-            if (-not $present) { $ok = $false }
+          foreach ($arch in @("x64","arm64")) {
+            foreach ($f in @("dbghelp.dll","dbgcore.dll")) {
+              $present = Test-Path "$kitsRoot\Debuggers\$arch\$f"
+              Write-Host "  $arch\$f : $present"
+              if ($arch -eq "x64" -and -not $present) { $ok = $false }
+            }
           }
-          if (-not $ok) { Write-Host "NOTE: Chromium's Debugging Tools check would still fail (diagnostic run - see locate step)" }
-          else { Write-Host "OK - the folders Chromium's vs_toolchain.py checks for are now present" }
+          if (-not $ok) { Write-Error "Chromium's Debugging Tools check would still fail"; exit 1 }
+          Write-Host "OK - the files Chromium's vs_toolchain.py checks for are now present"
 
       - name: Summary
         if: always()
