@@ -30,10 +30,10 @@ jobs:
           Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
           (Get-CimInstance Win32_OperatingSystem).OSArchitecture
           python --version
-          Write-Host "x64  dbghelp present: $(Test-Path "$env:KITS_ROOT\Debuggers\x64\dbghelp.dll")"
+          Write-Host "x64   dbghelp present: $(Test-Path "$env:KITS_ROOT\Debuggers\x64\dbghelp.dll")"
           Write-Host "arm64 dbghelp present: $(Test-Path "$env:KITS_ROOT\Debuggers\arm64\dbghelp.dll")"
 
-      - name: Fetch Chromium's real vs_toolchain.py + gn_helpers.py, write harness
+      - name: Fetch Chromium's real vs_toolchain.py + gn_helpers.py
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "chromium-build"
@@ -43,50 +43,42 @@ jobs:
               -Uri "https://raw.githubusercontent.com/chromium/chromium/main/build/$f" `
               -OutFile (Join-Path $dir $f)
           }
-          Write-Host "downloaded:"; Get-ChildItem $dir | ForEach-Object { Write-Host "  $($_.Name)" }
+          Get-ChildItem $dir | ForEach-Object { Write-Host "  downloaded $($_.Name)" }
           "CHROMIUM_BUILD_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          # Harness: call Chromium's real _CopyDebugger(target_dir, target_cpu).
-          # exit 0 = passed (no raise); exit 42 = raised (prints the exception).
-          $harness = @'
-import os, sys, tempfile
-sdk = r"C:\Program Files (x86)\Windows Kits\10"
-os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"     # use installed toolchain, no win_toolchain.json
-os.environ["WINDOWSSDKDIR"] = sdk
-os.environ.setdefault("GYP_MSVS_OVERRIDE_PATH", sdk)  # msdia140 copy is optional; any existing dir
-sys.path.insert(0, sys.argv[1])
-target_cpu = sys.argv[2]
-import vs_toolchain
-target = tempfile.mkdtemp()
-try:
-    vs_toolchain._CopyDebugger(target, target_cpu)
-except Exception as e:
-    print("RAISED: " + repr(e))
-    sys.exit(42)
-print("PASSED: _CopyDebugger(%s) did not raise; dbghelp copied=%s"
-      % (target_cpu, os.path.exists(os.path.join(target, "dbghelp.dll"))))
-sys.exit(0)
-'@
-          Set-Content -Path (Join-Path $dir "run_check.py") -Value $harness -Encoding utf8
-
       - name: BEFORE fix - arm64 target should already PASS
-        shell: pwsh
+        shell: python
         run: |
-          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" arm64 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $out
-          if ($code -ne 0) { Write-Error "arm64 unexpectedly failed (exit $code) - our model is wrong"; exit 1 }
-          Write-Host "OK - arm64 target passes on the current image (as expected)"
+          import os, sys, tempfile
+          sdk = r"C:\Program Files (x86)\Windows Kits\10"
+          os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+          os.environ["WINDOWSSDKDIR"] = sdk
+          os.environ.setdefault("GYP_MSVS_OVERRIDE_PATH", sdk)
+          sys.path.insert(0, os.environ["CHROMIUM_BUILD_DIR"])
+          import vs_toolchain
+          vs_toolchain._CopyDebugger(tempfile.mkdtemp(), "arm64")
+          print("OK - arm64 target passes on the current image (as expected)")
 
       - name: BEFORE fix - x64 target must RAISE the reporter's exact error
-        shell: pwsh
+        shell: python
         run: |
-          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" x64 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $out
-          if ($code -ne 42) { Write-Error "Expected x64 to RAISE before the fix, but exit was $code - did not reproduce"; exit 1 }
-          if ($out -notmatch "Debugging Tools for Windows") { Write-Error "Raised, but not the expected 'Debugging Tools for Windows' error"; exit 1 }
-          Write-Host "OK - reproduced the reporter's exact error with Chromium's real code"
+          import os, sys, tempfile
+          sdk = r"C:\Program Files (x86)\Windows Kits\10"
+          os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+          os.environ["WINDOWSSDKDIR"] = sdk
+          os.environ.setdefault("GYP_MSVS_OVERRIDE_PATH", sdk)
+          sys.path.insert(0, os.environ["CHROMIUM_BUILD_DIR"])
+          import vs_toolchain
+          try:
+              vs_toolchain._CopyDebugger(tempfile.mkdtemp(), "x64")
+          except Exception as e:
+              msg = repr(e)
+              print("RAISED:", msg)
+              assert "Debugging Tools for Windows" in msg, "raised, but not the expected error"
+              print("OK - reproduced the reporter's exact error with Chromium's real code")
+              sys.exit(0)
+          print("ERROR: x64 did NOT raise before the fix - not reproduced")
+          sys.exit(1)
 
       - name: Apply the fix - copy SDK bin\x64\DbgHelp.dll into Debuggers\x64
         shell: pwsh
@@ -100,13 +92,19 @@ sys.exit(0)
           Write-Host "copied $($src.FullName) ($($src.VersionInfo.FileVersion)) -> $dst\dbghelp.dll"
 
       - name: AFTER fix - x64 target must now PASS (Chromium's real code)
-        shell: pwsh
+        shell: python
         run: |
-          $out = python "$env:CHROMIUM_BUILD_DIR\run_check.py" "$env:CHROMIUM_BUILD_DIR" x64 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $out
-          if ($code -ne 0) { Write-Error "x64 still fails AFTER the fix (exit $code) - fix did NOT work"; exit 1 }
-          Write-Host "OK - x64 target passes after the fix -> the reporter's build is unblocked"
+          import os, sys, tempfile
+          sdk = r"C:\Program Files (x86)\Windows Kits\10"
+          os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+          os.environ["WINDOWSSDKDIR"] = sdk
+          os.environ.setdefault("GYP_MSVS_OVERRIDE_PATH", sdk)
+          sys.path.insert(0, os.environ["CHROMIUM_BUILD_DIR"])
+          import vs_toolchain
+          target = tempfile.mkdtemp()
+          vs_toolchain._CopyDebugger(target, "x64")
+          copied = os.path.exists(os.path.join(target, "dbghelp.dll"))
+          print("OK - x64 target passes after the fix; dbghelp copied to output =", copied)
 
       - name: Summary
         if: always()
