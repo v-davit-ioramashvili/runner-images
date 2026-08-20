@@ -73,49 +73,37 @@ jobs:
           Write-Host "used bytes before: $used"
           "DISK_BEFORE=$used" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Proven: winsdksetup on arm64 (feature toggle, feature layout, AND full layout) never
-      # offers the x64 debugger core. So hunt the image for an existing x64 dbghelp.dll /
-      # dbgcore.dll we could reuse (from VS, WDK, System32, etc.), with exact PE-arch + version.
-      - name: Hunt the image for a reusable x64 dbghelp.dll / dbgcore.dll
+      # Candidate fix (no download): the SDK's own x64 DbgHelp.dll already ships under
+      # Windows Kits\10\bin\<ver>\x64. Chromium reads from Debuggers\x64, which is empty.
+      # Copy the SDK bin x64 debugger DLLs into Debuggers\x64. dbghelp.dll is the only file
+      # Chromium hard-requires; dbgcore.dll / symsrv.dll are optional (copied if present).
+      - name: Populate Debuggers\x64 from the SDK's bin\x64 (copy-based fix)
         shell: pwsh
         run: |
-          function Get-PEMachine([string]$path) {
-            try {
-              $fs = [IO.File]::OpenRead($path); $br = New-Object IO.BinaryReader($fs)
-              $fs.Seek(0x3C,'Begin') | Out-Null; $peOff = $br.ReadInt32()
-              $fs.Seek($peOff + 4,'Begin') | Out-Null; $machine = $br.ReadUInt16(); $fs.Close()
-              switch ($machine) { 0x8664 {'x64'} 0xAA64 {'arm64'} 0x14C {'x86'} default { ('0x{0:X}' -f $machine) } }
-            } catch { 'ERR' }
-          }
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
+          $sdkVer   = "10.0.26100.0"
+          $srcDir   = "$kitsRoot\bin\$sdkVer\x64"
+          $dstDir   = "$kitsRoot\Debuggers\x64"
+          New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
 
-          $roots = @('C:\Program Files','C:\Program Files (x86)','C:\Windows\System32','C:\Windows\SysWOW64')
-          foreach ($name in @('dbghelp.dll','dbgcore.dll')) {
-            Write-Host "==================== $name ===================="
-            $hits = foreach ($r in $roots) {
-              if (Test-Path $r) {
-                Get-ChildItem $r -Recurse -Filter $name -ErrorAction SilentlyContinue -Force |
-                  ForEach-Object {
-                    [pscustomobject]@{
-                      Arch    = Get-PEMachine $_.FullName
-                      Version = $_.VersionInfo.FileVersion
-                      Path    = $_.FullName
-                    }
-                  }
-              }
+          # DbgHelp.dll is on-disk as mixed-case; Chromium looks up 'dbghelp.dll' (Windows FS
+          # is case-insensitive so this is fine). Copy the three files Chromium may want.
+          $copied = @()
+          foreach ($f in @("dbghelp.dll","dbgcore.dll","symsrv.dll")) {
+            $src = Join-Path $srcDir $f
+            if (Test-Path $src) {
+              Copy-Item $src (Join-Path $dstDir $f) -Force
+              $copied += "$f ($((Get-Item $src).VersionInfo.FileVersion))"
+            } else {
+              Write-Host "  not present in bin\x64: $f"
             }
-            # show all x64 copies first (that's what we could reuse), then the rest
-            $hits | Where-Object { $_.Arch -eq 'x64' } | Sort-Object Version -Descending |
-              ForEach-Object { Write-Host ("  [x64] {0,-18} {1}" -f $_.Version, $_.Path) }
-            $hits | Where-Object { $_.Arch -ne 'x64' } |
-              ForEach-Object { Write-Host ("  [{0}] {1,-18} {2}" -f $_.Arch, $_.Version, $_.Path) }
           }
+          Write-Host "copied into Debuggers\x64: $($copied -join '; ')"
 
-          # For reference: the SDK arm64 copy version we'd want to match
-          $armDbg = "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\dbghelp.dll"
-          if (Test-Path $armDbg) {
-            Write-Host "--- reference: SDK arm64 dbghelp version = $((Get-Item $armDbg).VersionInfo.FileVersion) ---"
-          }
-          "INSTALL_SECONDS=0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $sw.Stop()
+          "INSTALL_SECONDS=$([int]$sw.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "copy took $($sw.Elapsed.TotalMilliseconds) ms"
 
       - name: Measure the on-disk cost
         shell: pwsh
@@ -140,25 +128,22 @@ jobs:
           $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
           $x64dir = "$kitsRoot\Debuggers\x64"
 
-          Write-Host "--- full contents of Debuggers\x64 (what the x64 MSI installed) ---"
+          Write-Host "--- full contents of Debuggers\x64 after the copy ---"
           if (Test-Path $x64dir) {
             Get-ChildItem $x64dir -File -ErrorAction SilentlyContinue | Select-Object Name,@{n='KB';e={[int]($_.Length/1KB)}} | Format-Table -AutoSize | Out-String | Write-Host
           } else { Write-Host "  (Debuggers\x64 does not exist)" }
 
-          # Chromium's _CopyDebugger requires these two DLLs (NOT cdb.exe) for the target cpu.
-          $required = @("dbghelp.dll","dbgcore.dll")
-          Write-Host "--- Chromium-required files, per arch ---"
-          $ok = $true
+          # dbghelp.dll is the ONLY file Chromium hard-requires (raises if missing);
+          # dbgcore.dll and symsrv.dll are optional (skipped if absent).
+          Write-Host "--- Chromium files per arch (x64 dbghelp is mandatory) ---"
           foreach ($arch in @("x64","arm64")) {
-            foreach ($f in $required) {
-              $p = "$kitsRoot\Debuggers\$arch\$f"
-              $present = Test-Path $p
-              Write-Host "  $arch\$f : $present"
-              if ($arch -eq "x64" -and -not $present) { $ok = $false }
+            foreach ($f in @("dbghelp.dll","dbgcore.dll","symsrv.dll")) {
+              Write-Host "  $arch\$f : $(Test-Path "$kitsRoot\Debuggers\$arch\$f")"
             }
           }
-          if (-not $ok) { Write-Host "NOTE: x64 dbghelp.dll/dbgcore.dll still absent (diagnostic run - no install performed)" }
-          else { Write-Host "OK - Debuggers\x64\dbghelp.dll + dbgcore.dll present -> Chromium's check passes" }
+          $x64dbghelp = "$kitsRoot\Debuggers\x64\dbghelp.dll"
+          if (-not (Test-Path $x64dbghelp)) { Write-Error "MANDATORY x64 dbghelp.dll still missing - fix failed"; exit 1 }
+          Write-Host "OK - Debuggers\x64\dbghelp.dll present ($((Get-Item $x64dbghelp).VersionInfo.FileVersion)) -> Chromium's mandatory check passes"
 
       - name: Reproduce the issue check (Chromium gn / vs_toolchain.py)
         shell: pwsh
@@ -166,37 +151,34 @@ jobs:
           # vs_toolchain.py's _CopyDebugger raises "You must install ... 'Debugging Tools
           # for Windows' feature" when Debuggers\<target_cpu>\dbghelp.dll is absent.
           $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
+          # The arm64 build copies debuggers for BOTH arm64 and its win_clang_x64 host -> it
+          # needs Debuggers\x64\dbghelp.dll AND Debuggers\arm64\dbghelp.dll. Both mandatory.
           $ok = $true
-          foreach ($arch in @("x64","arm64")) {
-            foreach ($f in @("dbghelp.dll","dbgcore.dll")) {
-              $present = Test-Path "$kitsRoot\Debuggers\$arch\$f"
-              Write-Host "  $arch\$f : $present"
-              if ($arch -eq "x64" -and -not $present) { $ok = $false }
-            }
+          foreach ($p in @("$kitsRoot\Debuggers\x64\dbghelp.dll","$kitsRoot\Debuggers\arm64\dbghelp.dll")) {
+            $present = Test-Path $p
+            Write-Host "  $p : $present"
+            if (-not $present) { $ok = $false }
           }
-          if (-not $ok) { Write-Host "NOTE: Chromium's Debugging Tools check would still fail (diagnostic run)" }
-          else { Write-Host "OK - the files Chromium's vs_toolchain.py checks for are now present" }
+          if (-not $ok) { Write-Error "Chromium's Debugging Tools check would still fail"; exit 1 }
+          Write-Host "OK - both arm64 and x64 dbghelp.dll present -> an arm64 Chromium build passes the check"
 
       - name: Summary
         if: always()
         shell: pwsh
         run: |
           $kitsRoot = "C:\Program Files (x86)\Windows Kits\10"
-          $x64After = Test-Path "$kitsRoot\Debuggers\x64\cdb.exe"
-          $armAfter = Test-Path "$kitsRoot\Debuggers\arm64\cdb.exe"
+          $x64After = Test-Path "$kitsRoot\Debuggers\x64\dbghelp.dll"
           $rows = @(
-            "### Debugging Tools for Windows - ARM64 validation",
+            "### Debugging Tools for Windows - ARM64 validation (copy-based fix)",
             "",
             "| Metric | Value |",
             "| --- | --- |",
             "| Runner | windows-11-arm |",
             "| SDK present | 10.0.26100 |",
-            "| arm64 cdb.exe *before* fix | $($env:BEFORE_arm64) (already shipped) |",
-            "| x64 cdb.exe *before* fix | $($env:BEFORE_x64) (the gap #14061 hits) |",
-            "| x64 cdb.exe *after* fix | $(if ($x64After) {'installed'} else {'FAILED'}) |",
-            "| arm64 cdb.exe *after* fix | $(if ($armAfter) {'present'} else {'FAILED'}) |",
-            "| Install time | $($env:INSTALL_SECONDS)s |",
-            "| Disk delta (whole C:) | $($env:DISK_DELTA_MIB) MiB |",
-            "| Debuggers folder size | $($env:DBG_FOLDER_MIB) MiB |"
+            "| Fix | copy SDK bin\x64\DbgHelp.dll -> Debuggers\x64\dbghelp.dll |",
+            "| x64 Debuggers\\dbghelp.dll *before* | False (the gap #14061 hits) |",
+            "| x64 Debuggers\\dbghelp.dll *after*  | $(if ($x64After) {'present'} else {'FAILED'}) |",
+            "| Fix time | $($env:INSTALL_SECONDS)s (file copy) |",
+            "| Disk delta (whole C:) | $($env:DISK_DELTA_MIB) MiB |"
           )
           $rows -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
