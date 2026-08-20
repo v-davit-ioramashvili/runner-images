@@ -73,12 +73,11 @@ jobs:
           Write-Host "used bytes before: $used"
           "DISK_BEFORE=$used" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # NOTE: The plain production block (winsdksetup /features OptionId.WindowsDesktopDebuggers)
-      # was proven in run 32257158212 to run cleanly (66s, +59.7 MiB) yet NOT install the x64
-      # debuggers on an arm64 host - it only refreshes native (arm64) + x86. That is Sergei's
-      # earlier "problem". This step validates the arch-agnostic method: /layout the debuggers
-      # payload, then msiexec the x64 debuggers MSI directly.
-      - name: Install x64 Debugging Tools via SDK layout + msiexec (arm64-capable method)
+      # Prior runs proved: the feature toggle and a FEATURE-LIMITED layout on arm64 never
+      # fetch the x64 debugger core (only x86 + native). Hypothesis for this run: a FULL
+      # winsdksetup layout (no /features filter) is arch-neutral media and DOES include the
+      # real "SDK Debuggers-x64" MSI (with dbghelp.dll), which we can msiexec on arm64.
+      - name: Full SDK layout, enumerate + install the x64 debugger MSI
         shell: pwsh
         run: |
           $installerEntry = Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
@@ -90,30 +89,38 @@ jobs:
 
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-          # 1) Download only the debuggers-feature payloads into an offline layout
-          $layout = Join-Path $env:RUNNER_TEMP "sdk-dbg-layout"
-          Write-Host "--- winsdksetup /layout $layout ---"
-          $p = Start-Process -FilePath $setup -ArgumentList "/features","OptionId.WindowsDesktopDebuggers","/quiet","/norestart","/layout","`"$layout`"" -Wait -PassThru -NoNewWindow
+          # 1) FULL offline layout (no /features) - pulls the arch-neutral payload set
+          $layout = Join-Path $env:RUNNER_TEMP "sdk-full-layout"
+          Write-Host "--- winsdksetup FULL /layout $layout ---"
+          $p = Start-Process -FilePath $setup -ArgumentList "/quiet","/norestart","/layout","`"$layout`"" -Wait -PassThru -NoNewWindow
           Write-Host "layout exit code: $($p.ExitCode)"
+          $dlSecs = [int]$sw.Elapsed.TotalSeconds
+          Write-Host "full layout download took ${dlSecs}s"
 
-          # 2) Find the debugger MSIs that were laid down
-          Write-Host "--- debugger MSIs in layout ---"
-          $msis = Get-ChildItem $layout -Recurse -Filter *.msi -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -match 'Debugg' }
-          $msis | ForEach-Object { Write-Host "  $($_.Name)" }
+          # 2) List ALL debugger-related MSIs so we can see whether x64 core is present
+          Write-Host "--- all MSIs matching 'Debugg' in the full layout ---"
+          $dbgMsis = Get-ChildItem $layout -Recurse -Filter *.msi -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match 'Debugg' }
+          $dbgMsis | ForEach-Object { Write-Host ("  {0}  ({1} KB)" -f $_.Name, [int]($_.Length/1KB)) }
 
-          $x64msi = $msis | Where-Object { $_.Name -match 'x64' } | Select-Object -First 1
-          if (-not $x64msi) { throw "x64 debuggers MSI not found in layout - dumping all MSIs:`n" + ((Get-ChildItem $layout -Recurse -Filter *.msi | Select-Object -Expand Name) -join "`n") }
-          Write-Host "installing: $($x64msi.FullName)"
-
-          # 3) Install the x64 debuggers MSI (host-arch agnostic - plain payload copy)
-          $m = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i","`"$($x64msi.FullName)`"","/quiet","/norestart" -Wait -PassThru
-          Write-Host "msiexec exit code: $($m.ExitCode)"
-          if ($m.ExitCode -ne 0 -and $m.ExitCode -ne 3010) { throw "msiexec failed ($($m.ExitCode))" }
+          # 3) Install EVERY debugger MSI whose name contains x64 (covers 'SDK Debuggers-x64'
+          #    and 'X64 Debuggers And Tools'); harmless if a payload is already present.
+          $x64msis = $dbgMsis | Where-Object { $_.Name -match 'x64' }
+          if (-not $x64msis) {
+            Write-Host "NOTE: no x64 debugger MSI in the FULL layout either - the arm64 web installer does not offer it. Dumping every MSI name:"
+            Get-ChildItem $layout -Recurse -Filter *.msi | Select-Object -Expand Name | ForEach-Object { Write-Host "  $_" }
+          } else {
+            foreach ($msi in $x64msis) {
+              Write-Host "installing: $($msi.FullName)"
+              $m = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i","`"$($msi.FullName)`"","/quiet","/norestart" -Wait -PassThru
+              Write-Host "  msiexec exit code: $($m.ExitCode)"
+              if ($m.ExitCode -ne 0 -and $m.ExitCode -ne 3010) { throw "msiexec failed for $($msi.Name) ($($m.ExitCode))" }
+            }
+          }
 
           $sw.Stop()
           "INSTALL_SECONDS=$([int]$sw.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "layout + x64 MSI install took $([int]$sw.Elapsed.TotalSeconds)s"
+          Write-Host "layout + x64 MSI install(s) took $([int]$sw.Elapsed.TotalSeconds)s total"
 
       - name: Measure the on-disk cost
         shell: pwsh
