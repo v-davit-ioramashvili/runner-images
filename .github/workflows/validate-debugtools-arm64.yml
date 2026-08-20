@@ -73,54 +73,49 @@ jobs:
           Write-Host "used bytes before: $used"
           "DISK_BEFORE=$used" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Prior runs proved: the feature toggle and a FEATURE-LIMITED layout on arm64 never
-      # fetch the x64 debugger core (only x86 + native). Hypothesis for this run: a FULL
-      # winsdksetup layout (no /features filter) is arch-neutral media and DOES include the
-      # real "SDK Debuggers-x64" MSI (with dbghelp.dll), which we can msiexec on arm64.
-      - name: Full SDK layout, enumerate + install the x64 debugger MSI
+      # Proven: winsdksetup on arm64 (feature toggle, feature layout, AND full layout) never
+      # offers the x64 debugger core. So hunt the image for an existing x64 dbghelp.dll /
+      # dbgcore.dll we could reuse (from VS, WDK, System32, etc.), with exact PE-arch + version.
+      - name: Hunt the image for a reusable x64 dbghelp.dll / dbgcore.dll
         shell: pwsh
         run: |
-          $installerEntry = Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
-              | Where-Object { $_.DisplayName -match "Windows Software Development Kit" } `
-              | Sort-Object DisplayVersion -Descending | Select-Object -First 1
-          if (-not ($installerEntry -and $installerEntry.BundleCachePath)) { throw "SDK BundleCachePath not found" }
-          $setup = $installerEntry.BundleCachePath
-          Write-Host "setup = $setup"
-
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-          # 1) FULL offline layout (no /features) - pulls the arch-neutral payload set
-          $layout = Join-Path $env:RUNNER_TEMP "sdk-full-layout"
-          Write-Host "--- winsdksetup FULL /layout $layout ---"
-          $p = Start-Process -FilePath $setup -ArgumentList "/quiet","/norestart","/layout","`"$layout`"" -Wait -PassThru -NoNewWindow
-          Write-Host "layout exit code: $($p.ExitCode)"
-          $dlSecs = [int]$sw.Elapsed.TotalSeconds
-          Write-Host "full layout download took ${dlSecs}s"
-
-          # 2) List ALL debugger-related MSIs so we can see whether x64 core is present
-          Write-Host "--- all MSIs matching 'Debugg' in the full layout ---"
-          $dbgMsis = Get-ChildItem $layout -Recurse -Filter *.msi -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Name -match 'Debugg' }
-          $dbgMsis | ForEach-Object { Write-Host ("  {0}  ({1} KB)" -f $_.Name, [int]($_.Length/1KB)) }
-
-          # 3) Install EVERY debugger MSI whose name contains x64 (covers 'SDK Debuggers-x64'
-          #    and 'X64 Debuggers And Tools'); harmless if a payload is already present.
-          $x64msis = $dbgMsis | Where-Object { $_.Name -match 'x64' }
-          if (-not $x64msis) {
-            Write-Host "NOTE: no x64 debugger MSI in the FULL layout either - the arm64 web installer does not offer it. Dumping every MSI name:"
-            Get-ChildItem $layout -Recurse -Filter *.msi | Select-Object -Expand Name | ForEach-Object { Write-Host "  $_" }
-          } else {
-            foreach ($msi in $x64msis) {
-              Write-Host "installing: $($msi.FullName)"
-              $m = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i","`"$($msi.FullName)`"","/quiet","/norestart" -Wait -PassThru
-              Write-Host "  msiexec exit code: $($m.ExitCode)"
-              if ($m.ExitCode -ne 0 -and $m.ExitCode -ne 3010) { throw "msiexec failed for $($msi.Name) ($($m.ExitCode))" }
-            }
+          function Get-PEMachine([string]$path) {
+            try {
+              $fs = [IO.File]::OpenRead($path); $br = New-Object IO.BinaryReader($fs)
+              $fs.Seek(0x3C,'Begin') | Out-Null; $peOff = $br.ReadInt32()
+              $fs.Seek($peOff + 4,'Begin') | Out-Null; $machine = $br.ReadUInt16(); $fs.Close()
+              switch ($machine) { 0x8664 {'x64'} 0xAA64 {'arm64'} 0x14C {'x86'} default { ('0x{0:X}' -f $machine) } }
+            } catch { 'ERR' }
           }
 
-          $sw.Stop()
-          "INSTALL_SECONDS=$([int]$sw.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "layout + x64 MSI install(s) took $([int]$sw.Elapsed.TotalSeconds)s total"
+          $roots = @('C:\Program Files','C:\Program Files (x86)','C:\Windows\System32','C:\Windows\SysWOW64')
+          foreach ($name in @('dbghelp.dll','dbgcore.dll')) {
+            Write-Host "==================== $name ===================="
+            $hits = foreach ($r in $roots) {
+              if (Test-Path $r) {
+                Get-ChildItem $r -Recurse -Filter $name -ErrorAction SilentlyContinue -Force |
+                  ForEach-Object {
+                    [pscustomobject]@{
+                      Arch    = Get-PEMachine $_.FullName
+                      Version = $_.VersionInfo.FileVersion
+                      Path    = $_.FullName
+                    }
+                  }
+              }
+            }
+            # show all x64 copies first (that's what we could reuse), then the rest
+            $hits | Where-Object { $_.Arch -eq 'x64' } | Sort-Object Version -Descending |
+              ForEach-Object { Write-Host ("  [x64] {0,-18} {1}" -f $_.Version, $_.Path) }
+            $hits | Where-Object { $_.Arch -ne 'x64' } |
+              ForEach-Object { Write-Host ("  [{0}] {1,-18} {2}" -f $_.Arch, $_.Version, $_.Path) }
+          }
+
+          # For reference: the SDK arm64 copy version we'd want to match
+          $armDbg = "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\dbghelp.dll"
+          if (Test-Path $armDbg) {
+            Write-Host "--- reference: SDK arm64 dbghelp version = $((Get-Item $armDbg).VersionInfo.FileVersion) ---"
+          }
+          "INSTALL_SECONDS=0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Measure the on-disk cost
         shell: pwsh
@@ -162,8 +157,8 @@ jobs:
               if ($arch -eq "x64" -and -not $present) { $ok = $false }
             }
           }
-          if (-not $ok) { Write-Error "x64 dbghelp.dll/dbgcore.dll still missing - Chromium build would still fail"; exit 1 }
-          Write-Host "OK - Debuggers\x64\dbghelp.dll + dbgcore.dll present -> Chromium's check passes"
+          if (-not $ok) { Write-Host "NOTE: x64 dbghelp.dll/dbgcore.dll still absent (diagnostic run - no install performed)" }
+          else { Write-Host "OK - Debuggers\x64\dbghelp.dll + dbgcore.dll present -> Chromium's check passes" }
 
       - name: Reproduce the issue check (Chromium gn / vs_toolchain.py)
         shell: pwsh
@@ -179,8 +174,8 @@ jobs:
               if ($arch -eq "x64" -and -not $present) { $ok = $false }
             }
           }
-          if (-not $ok) { Write-Error "Chromium's Debugging Tools check would still fail"; exit 1 }
-          Write-Host "OK - the files Chromium's vs_toolchain.py checks for are now present"
+          if (-not $ok) { Write-Host "NOTE: Chromium's Debugging Tools check would still fail (diagnostic run)" }
+          else { Write-Host "OK - the files Chromium's vs_toolchain.py checks for are now present" }
 
       - name: Summary
         if: always()
