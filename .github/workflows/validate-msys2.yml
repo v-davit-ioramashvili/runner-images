@@ -1,0 +1,158 @@
+# TEMPORARY - validation for PR #14437. Covers both architectures because the
+# Configure-Shell guard removal affects x64 images too.
+# Delete this branch before merge.
+
+name: Validate MSYS2 PR 14437
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/msys2-final*'
+
+jobs:
+  arm64:
+    name: ARM64 end-to-end
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline
+        shell: pwsh
+        run: |
+          Write-Host "OSArchitecture   : $((Get-CimInstance Win32_OperatingSystem).OSArchitecture)"
+          Write-Host "C:\msys64 exists : $(Test-Path C:\msys64)"
+
+      - name: Stage the committed toolset (unmodified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force C:\image\tests | Out-Null
+          Copy-Item images\windows\toolsets\toolset-win-11-arm64.json C:\image\toolset.json
+          Copy-Item images\windows\scripts\tests\*.ps1  C:\image\tests\
+          Copy-Item images\windows\scripts\tests\*.psm1 C:\image\tests\
+          $m = (Get-Content C:\image\toolset.json -Raw | ConvertFrom-Json).MsysPackages
+          Write-Host "MsysPackages.msys2: $(@($m.msys2).Count)  mingw: $(@($m.mingw).Count)"
+          "IMAGE_FOLDER=C:\image" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "TEMP_DIR=$env:TEMP"    | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Force -SkipPublisherCheck -MinimumVersion 5.9.0
+
+      - name: Install MSYS2 (timed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module C:\image\tests\Helpers.psm1 -Force -DisableNameChecking
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          . .\images\windows\scripts\build\Install-Msys2.ps1
+          $sw.Stop()
+          Write-Host "RESULT install time: $([math]::Round($sw.Elapsed.TotalSeconds,0)) s"
+          $b = (Get-ChildItem C:\msys64 -Recurse -File -Force -EA SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+          Write-Host "RESULT size: $([math]::Round($b/1GB,2)) GB"
+
+      - name: Configure-Shell produces a CLANGARM64 wrapper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          if (Test-Path C:\shells) { Remove-Item -LiteralPath C:\shells -Recurse -Force }
+          . .\images\windows\scripts\build\Configure-Shell.ps1
+          Get-Content C:\shells\msys2bash.cmd
+          if (-not (Select-String -Path C:\shells\msys2bash.cmd -Pattern 'MSYSTEM=CLANGARM64' -Quiet)) { throw "not CLANGARM64" }
+          C:\shells\msys2bash.cmd -c 'echo MSYSTEM=$MSYSTEM; uname -o'
+          Write-Host "RESULT arm64 wrapper OK"
+
+      - name: Post-gen first launch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\images\windows\assets\post-gen\Msys2FirstLaunch.ps1
+          if (-not (Test-Path C:\msys64\home)) { throw "no msys2 home" }
+          Write-Host "RESULT first launch OK"
+
+      - name: Software report functions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\docs-gen\SoftwareReport.Common.psm1 -Force -DisableNameChecking
+          $s = Get-ShellTarget
+          $s | Format-Table | Out-String | Write-Host
+          if (-not ($s.Name -contains 'msys2bash.cmd')) { throw "msys2bash.cmd missing" }
+          Write-Host "RESULT Pacman: $(Get-PacmanVersion)"
+
+      - name: Machine PATH untouched
+        shell: pwsh
+        run: |
+          $mp = [Environment]::GetEnvironmentVariable('Path','Machine')
+          $hits = ($mp -split ';') | Where-Object { $_ -match 'msys64' }
+          if ($hits) { throw "msys64 leaked onto machine PATH" }
+          Write-Host "RESULT no msys64 on machine PATH"
+
+      - name: MSYS2 Pester tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module C:\image\tests\Helpers.psm1 -Force -DisableNameChecking
+          Invoke-PesterTests -TestFile "MSYS2"
+
+      - name: setup-msys2 with release false reuses the preinstalled MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          release: false
+          msystem: CLANGARM64
+          install: mingw-w64-clang-aarch64-gcc-compat
+
+      - name: Build through setup-msys2
+        shell: msys2 {0}
+        run: |
+          echo "MSYSTEM=$MSYSTEM"
+          gcc -dumpmachine
+          printf 'int main(void){return 0;}\n' > t.c
+          gcc t.c -o t.exe && echo "RESULT setup-msys2 build OK"
+
+  x64:
+    name: x64 not regressed by the guard removal
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Warm up msys2 so first-launch does not skew the probe
+        shell: pwsh
+        run: |
+          $env:MSYSTEM = 'MSYS'
+          & C:\msys64\usr\bin\bash.exe -lc 'echo warmup done'
+          exit 0
+
+      - name: Configure-Shell still produces a MINGW64 wrapper on x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          if (Test-Path C:\shells) { Remove-Item -LiteralPath C:\shells -Recurse -Force }
+          . .\images\windows\scripts\build\Configure-Shell.ps1
+          Get-Content C:\shells\msys2bash.cmd
+          if (-not (Select-String -Path C:\shells\msys2bash.cmd -Pattern 'MSYSTEM=MINGW64' -Quiet)) { throw "not MINGW64" }
+          Write-Host "RESULT x64 wrapper OK (guard removal did not change x64 behaviour)"
+
+      - name: Wrapper resolves the MINGW64 environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $probe = @(
+            'echo "MSYSTEM=${MSYSTEM}"',
+            'echo "MSYSTEM_PREFIX=${MSYSTEM_PREFIX}"',
+            'echo "PATH0=${PATH%%:*}"'
+          )
+          Set-Content -Path probe.sh -Value $probe -Encoding ascii
+          $out = (& C:\shells\msys2bash.cmd probe.sh) -join "`n"
+          Write-Host $out
+          if ($out -notmatch 'MSYSTEM_PREFIX=/mingw64') { throw "wrong prefix" }
+          if ($out -notmatch 'PATH0=/mingw64/bin')      { throw "/mingw64/bin not first on PATH" }
+          Write-Host "RESULT x64 MSYSTEM casing fix confirmed"
