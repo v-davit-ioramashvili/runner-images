@@ -1,0 +1,158 @@
+# TEMPORARY - validation aid for #14607 / #14524 (LLVM pin review).
+# Proves the LLVM 20.1.6 -> 22.1.8 unpin on a hosted windows-11-arm runner:
+# stages the toolset with the new version, runs the REAL Install-LLVM.ps1 from
+# this branch (which also runs LLVM.Tests.ps1), then compiles and runs a C and a
+# C++ program with the new clang to prove it actually works on ARM64. A final
+# non-fatal step shows Docker is unaffected by the change.
+# Delete this file before opening the PR.
+
+name: Validate LLVM ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/llvm-arm64*'
+
+env:
+  NEW_LLVM_VERSION: "22.1.8"
+
+jobs:
+  llvm:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+
+    env:
+      IMAGE_FOLDER: ${{ github.workspace }}\image
+      TEMP_DIR: ${{ github.workspace }}\temp
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - LLVM the image ships today
+        shell: pwsh
+        run: |
+          Write-Host "uname/arch: $env:PROCESSOR_ARCHITECTURE"
+          if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "not an ARM64 runner" }
+          $clang = Get-Command clang -ErrorAction SilentlyContinue
+          if ($clang) {
+            Write-Host "clang resolves to: $($clang.Source)"
+            Write-Host ((clang --version | Select-Object -First 1))
+          } else {
+            Write-Host "clang not found on PATH (unexpected on this image)"
+          }
+          Write-Host "Pinned in toolset (branch): $((Get-Content .\images\windows\toolsets\toolset-win-11-arm64.json -Raw | ConvertFrom-Json).llvm.version)"
+
+      - name: Stage the build environment with the bumped toolset version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path $env:IMAGE_FOLDER -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:TEMP_DIR   -Force | Out-Null
+
+          # Get-ToolsetContent reads $env:IMAGE_FOLDER\toolset.json. Stage the real
+          # arm64 toolset but force llvm.version to the candidate so this file tests
+          # the bump even before the toolset edit is committed.
+          $toolset = Get-Content .\images\windows\toolsets\toolset-win-11-arm64.json -Raw | ConvertFrom-Json
+          $toolset.llvm.version = $env:NEW_LLVM_VERSION
+          if ($toolset.llvm.PSObject.Properties.Name -contains "pinnedDetails") {
+            $toolset.llvm.PSObject.Properties.Remove("pinnedDetails")
+          }
+          $toolset | ConvertTo-Json -Depth 100 | Set-Content "$env:IMAGE_FOLDER\toolset.json" -Encoding utf8
+          Write-Host "Staged toolset llvm.version: $((Get-Content "$env:IMAGE_FOLDER\toolset.json" -Raw | ConvertFrom-Json).llvm.version)"
+
+      - name: Install the bumped LLVM with the script from this branch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # the build runs the install scripts with the helper modules loaded and the
+          # tests staged under C:\image\tests - reproduce that here
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+          New-Item -ItemType Directory -Path C:\image\tests -Force | Out-Null
+          Copy-Item .\images\windows\scripts\tests\*.ps1 C:\image\tests -Force
+
+          # a fresh image has no LLVM yet; this runner already ships 20.1.6, so remove
+          # it first to mirror the clean install the packer build performs
+          if (Test-Path "C:\Program Files\LLVM") {
+            Write-Host "Removing pre-installed C:\Program Files\LLVM to mirror a clean build"
+            Remove-Item "C:\Program Files\LLVM" -Recurse -Force
+          }
+
+          # Install-LLVM.ps1 ends with Invoke-PesterTests -TestFile "LLVM", so this
+          # step also runs the version-assertion test against the new clang.
+          . .\images\windows\scripts\build\Install-LLVM.ps1
+
+      - name: Confirm the installed clang is the bumped version and on PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "C:\Program Files\LLVM\bin\clang.exe"
+          if (-not (Test-Path $exe)) { throw "clang.exe not found at $exe" }
+          $ver = (& $exe --version | Select-Object -First 1)
+          Write-Host $ver
+          if ($ver -notmatch [regex]::Escape($env:NEW_LLVM_VERSION)) {
+            throw "clang reports '$ver', expected to contain $env:NEW_LLVM_VERSION"
+          }
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+          if ($machinePath -notmatch [regex]::Escape("C:\Program Files\LLVM\bin")) {
+            throw "LLVM bin was not added to the machine PATH"
+          }
+          Write-Host "OK - clang $env:NEW_LLVM_VERSION installed and on the machine PATH"
+
+      - name: Functional smoke test - compile and run C and C++ with the new clang
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe    = "C:\Program Files\LLVM\bin\clang.exe"
+          $exeCpp = "C:\Program Files\LLVM\bin\clang++.exe"
+          $work = Join-Path $env:TEMP_DIR "clangtest"
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+          '#include <stdio.h>
+          int main(void){ printf("hello-c-%d\n", 42); return 0; }' | Set-Content "$work\hello.c" -Encoding ascii
+          & $exe "$work\hello.c" -o "$work\hello_c.exe"
+          if ($LASTEXITCODE -ne 0) { throw "clang failed to compile hello.c" }
+          $outC = & "$work\hello_c.exe"
+          Write-Host "C  output: $outC"
+          if ($outC -ne "hello-c-42") { throw "C program produced unexpected output: $outC" }
+
+          '#include <iostream>
+          int main(){ std::cout << "hello-cpp-" << (21*2) << std::endl; return 0; }' | Set-Content "$work\hello.cpp" -Encoding ascii
+          & $exeCpp "$work\hello.cpp" -o "$work\hello_cpp.exe"
+          if ($LASTEXITCODE -ne 0) { throw "clang++ failed to compile hello.cpp" }
+          $outCpp = & "$work\hello_cpp.exe"
+          Write-Host "C++ output: $outCpp"
+          if ($outCpp -ne "hello-cpp-42") { throw "C++ program produced unexpected output: $outCpp" }
+
+          # confirm the produced binary is native ARM64
+          function Get-PEMachine([string] $Path) {
+            $s = [IO.File]::OpenRead($Path)
+            try { $r = New-Object IO.BinaryReader($s); $s.Position = 0x3C; $s.Position = $r.ReadInt32() + 4; $m = $r.ReadUInt16() }
+            finally { $s.Dispose() }
+            switch ($m) { 0x8664 {"x64"} 0xAA64 {"ARM64"} 0x014C {"x86"} default {"0x{0:X4}" -f $m} }
+          }
+          $mach = Get-PEMachine "$work\hello_c.exe"
+          Write-Host "PE machine of clang-produced exe: $mach"
+          if ($mach -ne "ARM64") { throw "clang produced a $mach binary, expected ARM64" }
+          Write-Host "OK - clang and clang++ compile, link, run, and target ARM64"
+
+      - name: Docker unaffected (informational, non-fatal)
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Write-Host "docker CLI: $((Get-Command docker -ErrorAction SilentlyContinue).Source)"
+          docker --version
+          docker info --format '{{.ServerVersion}}' 2>$null
+
+      - name: Record supply-chain posture of the downloaded archive
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem "$env:TEMP_DIR" -Recurse -Include "clang+llvm-*aarch64-pc-windows-msvc.tar*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "File:   $($_.Name)"
+            Write-Host "SHA256: $((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
+          }
