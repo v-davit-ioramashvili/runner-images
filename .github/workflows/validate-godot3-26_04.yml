@@ -145,12 +145,19 @@ jobs:
           echo "--- native install should fail ---"
           sudo apt-get install -y godot3-server && { echo "unexpected: native install worked"; exit 1; } || echo "confirmed: native amd64v3 cannot locate it"
 
-      - name: Apply the workaround - add amd64 architecture and install :amd64
+      - name: Apply the workaround - add an amd64 apt source and install :amd64
         run: |
           set -x
           sudo dpkg --add-architecture amd64
+          # The image only fetches amd64v3 indices; add a real amd64 source so apt
+          # can see binary-amd64 (main for deps + universe for godot3-server).
+          printf '%s\n' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu resolute main universe' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu resolute-updates main universe' \
+            'deb [arch=amd64] http://security.ubuntu.com/ubuntu resolute-security main universe' \
+            | sudo tee /etc/apt/sources.list.d/amd64-ports.list
           sudo apt-get update
-          echo "--- policy after adding amd64 ---"
+          echo "--- policy after adding amd64 source ---"
           apt-cache policy godot3-server:amd64 || true
           sudo apt-get install -y godot3-server:amd64
 
