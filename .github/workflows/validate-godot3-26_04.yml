@@ -1,0 +1,131 @@
+# TEMPORARY - validation aid for #14635.
+# The reporter claims `godot3-server` cannot be located on ubuntu-26.04 even with
+# universe enabled. The Ubuntu archive shows godot3-server 3.6.2+ds-1build2 in
+# resolute [universe] for amd64+arm64, so this captures ground truth from the
+# actual hosted runner: the real apt sources, whether universe is truly enabled,
+# what the Azure mirror serves, and the reporter's exact repro - to tell mirror
+# lag apart from a genuinely missing/disabled component.
+# Delete this file before opening any PR.
+
+name: Validate godot3-server 26.04
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/godot3-26_04*'
+
+jobs:
+  godot3:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "runner label : ${{ matrix.runner }}"
+          echo "uname -m     : $(uname -m)"
+          lsb_release -a || true
+          echo "--- codename should be 'resolute' for 26.04 ---"
+          . /etc/os-release && echo "VERSION_CODENAME=$VERSION_CODENAME  VERSION=$VERSION"
+
+      - name: Show the apt sources the image ships (before any change)
+        run: |
+          echo "=== /etc/apt/sources.list.d/ubuntu.sources ==="
+          sudo cat /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || echo "(no ubuntu.sources)"
+          echo
+          echo "=== /etc/apt/sources.list (legacy, if any) ==="
+          sudo cat /etc/apt/sources.list 2>/dev/null || echo "(none)"
+          echo
+          echo "=== /etc/apt/apt-mirrors.txt (failover list) ==="
+          sudo cat /etc/apt/apt-mirrors.txt 2>/dev/null || echo "(none)"
+          echo
+          echo "=== any extra sources.list.d entries ==="
+          sudo grep -rHnE 'universe' /etc/apt/sources.list.d/ 2>/dev/null || echo "(no 'universe' match in sources.list.d)"
+
+      - name: apt-cache policy BEFORE any update (default image state)
+        run: |
+          echo "--- is universe already an enabled component? ---"
+          apt-cache policy | grep -iE 'universe' || echo "(universe not shown in policy)"
+          echo
+          echo "--- godot3-server as the image ships ---"
+          apt-cache policy godot3-server || true
+
+      - name: Plain apt-get update (capture mirror behaviour)
+        run: |
+          set -x
+          sudo apt-get update 2>&1 | tee /tmp/update1.log || true
+          echo "--- godot3-server after a plain update ---"
+          apt-cache policy godot3-server || true
+
+      - name: Reporter's exact repro
+        run: |
+          set -x
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y universe
+          sudo apt-get update 2>&1 | tee /tmp/update2.log || true
+
+          echo "=== apt-cache policy godot3-server ==="
+          apt-cache policy godot3-server || true
+
+          echo "=== dry-run install ==="
+          sudo apt-get install --dry-run godot3-server || true
+
+      - name: Diagnostics - where does universe/godot3-server actually resolve
+        if: always()
+        run: |
+          echo "=== which release files carry universe, and from which host ==="
+          grep -RniE 'universe' /var/lib/apt/lists/*Release 2>/dev/null | head || true
+          echo
+          echo "=== does any apt index list godot3-server at all ==="
+          grep -Rsl '^Package: godot3-server$' /var/lib/apt/lists/ 2>/dev/null || echo "(godot3-server not in any downloaded index)"
+          echo
+          echo "=== apt-cache madison (versions/pockets apt can see) ==="
+          apt-cache madison godot3-server || echo "(madison: nothing)"
+          echo
+          echo "=== is it on the canonical archive right now (bypasses the mirror) ==="
+          echo "--- resolute universe binary index (host arch) ---"
+          arch=$(dpkg --print-architecture)
+          url="http://archive.ubuntu.com/ubuntu/dists/resolute/universe/binary-${arch}/Packages.gz"
+          echo "GET $url"
+          if curl -fsSL "$url" | zcat | grep -A1 '^Package: godot3-server$' | head; then
+            echo "-> godot3-server IS in canonical resolute/universe for ${arch}"
+          else
+            echo "-> NOT found on canonical archive for ${arch} (unexpected)"
+          fi
+
+      - name: Attempt the real install
+        if: always()
+        run: |
+          set -x
+          if sudo apt-get install -y godot3-server; then
+            echo "INSTALL_OK=yes" >> "$GITHUB_ENV"
+            godot3-server --version || true
+          else
+            echo "INSTALL_OK=no" >> "$GITHUB_ENV"
+            echo "install failed - see logs above"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### godot3-server on ${{ matrix.runner }}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            echo "| Arch | $(uname -m) |"
+            echo "| Codename | $(. /etc/os-release && echo "$VERSION_CODENAME") |"
+            echo "| Install succeeded | ${INSTALL_OK:-unknown} |"
+            echo "| godot3-server version | $(godot3-server --version 2>/dev/null || echo 'not installed') |"
+          } >> "$GITHUB_STEP_SUMMARY"
