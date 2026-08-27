@@ -129,3 +129,47 @@ jobs:
             echo "| Install succeeded | ${INSTALL_OK:-unknown} |"
             echo "| godot3-server version | $(godot3-server --version 2>/dev/null || echo 'not installed') |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Verify the client-facing workaround for x64 (amd64v3): enabling the plain
+  # amd64 architecture and installing godot3-server:amd64.
+  multiarch-workaround:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Confirm amd64v3 and that godot3-server is absent for the native arch
+        run: |
+          echo "native dpkg arch : $(dpkg --print-architecture)"
+          apt-get -o Debug::NoLocking=1 -q update >/dev/null 2>&1 || sudo apt-get -q update
+          echo "--- native install should fail ---"
+          sudo apt-get install -y godot3-server && { echo "unexpected: native install worked"; exit 1; } || echo "confirmed: native amd64v3 cannot locate it"
+
+      - name: Apply the workaround - add amd64 architecture and install :amd64
+        run: |
+          set -x
+          sudo dpkg --add-architecture amd64
+          sudo apt-get update
+          echo "--- policy after adding amd64 ---"
+          apt-cache policy godot3-server:amd64 || true
+          sudo apt-get install -y godot3-server:amd64
+
+      - name: Verify it runs
+        run: |
+          set -x
+          which godot3-server
+          dpkg -l godot3-server:amd64 | tail -3
+          godot3-server --version || godot3-server --help 2>&1 | head -3 || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### godot3-server:amd64 multiarch workaround on ubuntu-26.04"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            echo "| Native arch | $(dpkg --print-architecture) |"
+            echo "| godot3-server present | $(command -v godot3-server || echo 'NOT FOUND') |"
+            echo "| Installed pkg | $(dpkg-query -W -f='${Package}:${Architecture} ${Version}' godot3-server 2>/dev/null || echo 'not installed') |"
+          } >> "$GITHUB_STEP_SUMMARY"
