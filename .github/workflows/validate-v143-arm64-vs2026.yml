@@ -99,17 +99,26 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+          # Per MS docs: use the installer setup.exe (NOT vs_installer.exe) for modify, and
+          # do NOT pass --wait (setup.exe rejects it with error 87). channelId is required
+          # for modify alongside --installPath.
+          $setup = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe"
+          $chId = $null
+          $state = Get-ChildItem "C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances\*\state.json" -ErrorAction SilentlyContinue |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($state) { try { $chId = (Get-Content $state.FullName -Raw | ConvertFrom-Json).channelId } catch {} }
+          Write-Host "channelId: $chId"
 
           # -ArgumentList as ONE string => we control quoting (installPath has spaces)
           function Add-Comp([string]$comp) {
-            Write-Host "`n>>> vs_installer modify --add $comp"
-            $argline = 'modify --installPath "{0}" --add {1} --quiet --norestart --wait' -f $env:VS_INSTALLPATH, $comp
+            Write-Host "`n>>> setup.exe modify --add $comp"
+            $ch = if ($chId) { ' --channelId {0}' -f $chId } else { '' }
+            $argline = ('modify --installPath "{0}"{1} --add {2} --quiet --norestart' -f $env:VS_INSTALLPATH, $ch, $comp)
             Write-Host "    cmdline: $argline"
-            $p = Start-Process -FilePath $vsInstaller -ArgumentList $argline -Wait -PassThru
-            Get-Process -Name 'vs_installer','setup','vs_installershell','vs_bootstrapper' -ErrorAction SilentlyContinue |
+            $p = Start-Process -FilePath $setup -ArgumentList $argline -Wait -PassThru
+            Get-Process -Name 'setup','vs_installer','vs_installershell','vs_bootstrapper','ServiceHub*' -ErrorAction SilentlyContinue |
               Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
-            Write-Host "    exit code: $($p.ExitCode)   # 0 ok, 3010 ok/reboot, other=failure"
+            Write-Host "    exit code: $($p.ExitCode)   # 0 ok, 3010 ok/reboot, 740 elevation, other=failure"
             return $p.ExitCode
           }
 
