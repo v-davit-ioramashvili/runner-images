@@ -1,10 +1,10 @@
 # TEMPORARY - validation aid for #14721.
-# On a hosted windows-11-arm runner: shows the Android cmake set the image ships
-# today (3.18.1 / 3.22.1), then drives the SAME sdkmanager path the build uses
-# (Install-AndroidSDKPackages) to install the Server 2025 set (3.30.5 / 3.31.5 /
-# 4.1.2), proving the install step returns 0, the reporter's test case passes, and
-# reporting the PE arch of each cmake.exe (expected x64 - the SDK channel has no
-# native win-arm64 cmake).
+# On a hosted windows-11-arm runner: proves the Server 2025 Android cmake set
+# (3.30.5 / 3.31.5 / 4.1.2) installs via the same sdkmanager path the build uses,
+# that each cmake.exe runs and reports its version (the reporter's test case), and
+# reports each binary's PE arch (expected x64 - the SDK channel has no native
+# win-arm64 cmake). If the runner has no Android SDK, it bootstraps cmdline-tools
+# (same pinned URL as the toolset) so the test is self-contained.
 # Delete this file before opening the PR.
 
 name: Validate Android CMake ARM64
@@ -20,47 +20,78 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 30
 
+    env:
+      CMDLINE_TOOLS_URL: https://dl.google.com/android/repository/commandlinetools-win-9123335_latest.zip
+
     steps:
       - uses: actions/checkout@v5
 
-      - name: Locate the Android SDK the image ships
+      - name: Diagnostics - what does this runner actually have
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "ANDROID_HOME           = '$env:ANDROID_HOME'"
+          Write-Host "ANDROID_SDK_ROOT       = '$env:ANDROID_SDK_ROOT'"
+          Write-Host "JAVA_HOME              = '$env:JAVA_HOME'"
+          foreach ($p in @("C:\Android\android-sdk", "C:\Program Files (x86)\Android\android-sdk")) {
+            Write-Host ("path {0,-45} : {1}" -f $p, (Test-Path $p))
+          }
+          try { (& java -version) 2>&1 | ForEach-Object { Write-Host "java: $_" } } catch { Write-Host "java not on PATH" }
+
+      - name: Resolve or bootstrap the Android SDK
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $sdkRoot = $env:ANDROID_HOME
-          if (-not $sdkRoot) { $sdkRoot = $env:ANDROID_SDK_ROOT }
-          if (-not $sdkRoot -or -not (Test-Path $sdkRoot)) {
-            throw "No Android SDK on this runner (ANDROID_HOME='$env:ANDROID_HOME')"
-          }
-          $sdkmanager = Join-Path $sdkRoot "cmdline-tools\latest\bin\sdkmanager.bat"
-          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager not found at $sdkmanager" }
-          "SDK_ROOT=$sdkRoot"       | Out-File $env:GITHUB_ENV -Append
-          "SDKMANAGER=$sdkmanager"  | Out-File $env:GITHUB_ENV -Append
-          Write-Host "SDK root : $sdkRoot"
-          Write-Host "sdkmanager: $sdkmanager"
 
-      - name: Baseline - Android cmake versions present today
+          # 1) reuse an SDK already on the image, if present
+          $candidates = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT,
+                          "C:\Android\android-sdk", "C:\Program Files (x86)\Android\android-sdk")
+          $sdkRoot = $candidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "cmdline-tools\latest\bin\sdkmanager.bat")) } | Select-Object -First 1
+
+          # 2) otherwise bootstrap cmdline-tools (the pinned toolset URL)
+          if (-not $sdkRoot) {
+            Write-Host "No usable SDK found - bootstrapping cmdline-tools"
+            $sdkRoot = "C:\Android\android-sdk"
+            $dest = Join-Path $sdkRoot "cmdline-tools"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            $zip = Join-Path $env:RUNNER_TEMP "cmdline-tools.zip"
+            Invoke-WebRequest -Uri $env:CMDLINE_TOOLS_URL -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dest -Force
+            # archive lays down cmdline-tools\cmdline-tools\bin ; sdkmanager wants ...\latest\bin
+            Rename-Item (Join-Path $dest "cmdline-tools") (Join-Path $dest "latest")
+          }
+
+          $sdkmanager = Join-Path $sdkRoot "cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager still not found at $sdkmanager" }
+
+          "SDK_ROOT=$sdkRoot"      | Out-File $env:GITHUB_ENV -Append
+          "SDKMANAGER=$sdkmanager" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "Using SDK root : $sdkRoot"
+          Write-Host "sdkmanager     : $sdkmanager"
+
+          # accept licenses (no-op if already accepted on the image)
+          $yes = [string]::Join("`n", (1..50 | ForEach-Object { "y" }))
+          $yes | & $sdkmanager --licenses --sdk_root=$sdkRoot | Out-Null
+
+      - name: Baseline - Android cmake versions present before
         shell: pwsh
         run: |
           $cmakeDir = Join-Path $env:SDK_ROOT "cmake"
           if (Test-Path $cmakeDir) {
             Get-ChildItem $cmakeDir -Directory | ForEach-Object { Write-Host "present: $($_.Name)" }
-          } else {
-            Write-Host "no cmake dir yet under the SDK"
-          }
+          } else { Write-Host "no cmake dir yet under the SDK" }
 
       - name: Install the Server 2025 cmake set via sdkmanager (the build's path)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $versions = @("3.30.5", "3.31.5", "4.1.2")
-          foreach ($v in $versions) {
+          $failed = @()
+          foreach ($v in @("3.30.5", "3.31.5", "4.1.2")) {
             Write-Host "=== sdkmanager --install cmake;$v ==="
             & $env:SDKMANAGER --install "cmake;$v" --sdk_root=$env:SDK_ROOT
-            if ($LASTEXITCODE -ne 0) {
-              throw "sdkmanager failed for cmake;$v with exit code $LASTEXITCODE"
-            }
+            if ($LASTEXITCODE -ne 0) { $failed += "cmake;$v (exit $LASTEXITCODE)" }
           }
+          if ($failed.Count -gt 0) { throw "sdkmanager failed for: $($failed -join ', ')" }
           Write-Host "All three packages installed with exit code 0."
 
       - name: Reporter's test case - each cmake.exe runs and reports its version
@@ -75,12 +106,7 @@ jobs:
               $stream.Position = $reader.ReadInt32() + 4
               $machine = $reader.ReadUInt16()
             } finally { $stream.Dispose() }
-            switch ($machine) {
-              0x8664  { "x64" }
-              0xAA64  { "ARM64" }
-              0x014C  { "x86" }
-              default { "0x{0:X4}" -f $machine }
-            }
+            switch ($machine) { 0x8664 {"x64"} 0xAA64 {"ARM64"} 0x014C {"x86"} default {"0x{0:X4}" -f $machine} }
           }
           foreach ($v in @("3.30.5", "3.31.5", "4.1.2")) {
             $exe = Join-Path $env:SDK_ROOT "cmake\$v\bin\cmake.exe"
@@ -88,9 +114,7 @@ jobs:
             $reported = (& $exe --version | Select-Object -First 1)
             $arch = Get-PEMachine $exe
             Write-Host ("cmake;{0} -> {1} [PE: {2}]" -f $v, $reported, $arch)
-            if ($reported -notmatch [regex]::Escape($v)) {
-              throw "version mismatch for cmake;$v : reported '$reported'"
-            }
+            if ($reported -notmatch [regex]::Escape($v)) { throw "version mismatch for cmake;$v : '$reported'" }
           }
           Write-Host "OK - all three versions install, run, and report the expected version."
 
@@ -100,10 +124,10 @@ jobs:
         run: |
           "### Android CMake ARM64 validation (windows-11-arm)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           "" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          $cmakeDir = Join-Path $env:SDK_ROOT "cmake"
-          if (Test-Path $cmakeDir) {
+          $cmakeDir = if ($env:SDK_ROOT) { Join-Path $env:SDK_ROOT "cmake" } else { $null }
+          if ($cmakeDir -and (Test-Path $cmakeDir)) {
             "Installed cmake versions:" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-            Get-ChildItem $cmakeDir -Directory | ForEach-Object {
-              "- $($_.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-            }
+            Get-ChildItem $cmakeDir -Directory | ForEach-Object { "- $($_.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append }
+          } else {
+            "No cmake directory resolved." | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
