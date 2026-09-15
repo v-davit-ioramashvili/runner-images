@@ -91,8 +91,12 @@ jobs:
           $code = $LASTEXITCODE
           Write-Host "BEFORE msbuild exit code: $code"
           "BEFORE_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # the expected BEFORE failure must not abort the job - reset and succeed
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Apply - add the fixed-version ARM64 component via the VS installer
+        if: always()
         shell: pwsh
         run: |
           $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
@@ -103,6 +107,9 @@ jobs:
           $code = $p.ExitCode
           Write-Host "vs_installer exit code: $code"   # 0 = ok, 3010 = ok/reboot, other = failure
           "VS_INSTALL_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # vs_installer can detach a background setup - wait for it to finish
+          Get-Process -Name 'vs_installer','setup','vs_installershell','vs_bootstrapper' -ErrorAction SilentlyContinue |
+            Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
 
           # surface whether the catalog even knows this component
           Write-Host "`n=== recent VS installer log lines mentioning the component / 'could not be found' ==="
@@ -115,6 +122,7 @@ jobs:
           "COMPONENT_NOTFOUND=$notFound" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: After - re-check ARM64 tools and rebuild
+        if: always()
         shell: pwsh
         run: |
           $msvc = Join-Path $env:VS_INSTALLPATH "VC\Tools\MSVC"
@@ -133,6 +141,8 @@ jobs:
           $code = $LASTEXITCODE
           Write-Host "AFTER msbuild exit code: $code"
           "AFTER_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Summary + verdict
         if: always()
