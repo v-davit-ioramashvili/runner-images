@@ -1,0 +1,166 @@
+# TEMPORARY - validation aid for #14552 / PR #14555 (v143 ARM64 build tools on windows-2025-vs2026).
+# Runs on a hosted windows-2025-vs2026 runner and answers the question the failing
+# PR CI can't tell us from the public logs:
+#   1. Baseline - does the image ship v143 (14.44) x64 but NOT v143 ARM64 build tools
+#      today? Reproduces the reporter's failing msbuild ARM64 v143 build.
+#   2. Is the fixed-version component the PR adds -
+#      Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64 - actually available in
+#      the VS 2026 installer catalog, i.e. can vs_installer install it at all?
+#   3. If it installs, does the ARM64 v143 build then pass?
+# If the component id is not published for VS 2026, that is why the image build fails
+# and the PR needs a different component (e.g. VC.Tools.ARM64 is already present).
+# Not part of any PR - delete the branch when done.
+
+name: Validate v143 ARM64 (vs2026)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/v143-arm64-vs2026*'
+
+env:
+  COMPONENT: "Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64"
+  TOOLSET_GLOB: "14.44.*"
+
+jobs:
+  v143-arm64:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+
+    steps:
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Baseline - VS install, toolsets, and reproduce the missing ARM64 v143 build
+        shell: pwsh
+        run: |
+          $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          $ver  = (& $vswhere -latest -products * -property installationVersion).Trim()
+          $name = (& $vswhere -latest -products * -property displayName).Trim()
+          Write-Host "VS: $name  $ver"
+          Write-Host "installPath: $installPath"
+          "VS_INSTALLPATH=$installPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          $msvc = Join-Path $installPath "VC\Tools\MSVC"
+          Write-Host "`nMSVC toolset dirs:"
+          Get-ChildItem $msvc -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+          $t = Get-ChildItem $msvc -Filter $env:TOOLSET_GLOB -ErrorAction SilentlyContinue | Select-Object -First 1
+          $armClBefore = $false
+          if ($t) {
+            $armCl = Join-Path $t.FullName "bin\Hostx64\arm64\cl.exe"
+            $x64Cl = Join-Path $t.FullName "bin\Hostx64\x64\cl.exe"
+            Write-Host "`n14.44 toolset: $($t.FullName)"
+            Write-Host "  x64 cl:   $(Test-Path $x64Cl)"
+            Write-Host "  arm64 cl: $(Test-Path $armCl)"
+            $armClBefore = Test-Path $armCl
+          } else {
+            Write-Host "`nno 14.44 toolset dir found"
+          }
+          "ARM_CL_BEFORE=$armClBefore" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # reporter's dummy v143 / ARM64 project (built without a here-string to keep YAML safe)
+          $lines = @(
+            '<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+            '  <ItemGroup Label="ProjectConfigurations">'
+            '    <ProjectConfiguration Include="Release|ARM64">'
+            '      <Configuration>Release</Configuration>'
+            '      <Platform>ARM64</Platform>'
+            '    </ProjectConfiguration>'
+            '  </ItemGroup>'
+            '  <PropertyGroup Label="Globals">'
+            '    <ProjectGuid>{12345678-1234-1234-1234-123456789ABC}</ProjectGuid>'
+            '    <Keyword>Win32Proj</Keyword>'
+            '  </PropertyGroup>'
+            '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />'
+            '  <PropertyGroup Condition="''$(Configuration)|$(Platform)''==''Release|ARM64''" Label="Configuration">'
+            '    <ConfigurationType>Application</ConfigurationType>'
+            '    <PlatformToolset>v143</PlatformToolset>'
+            '  </PropertyGroup>'
+            '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />'
+            '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />'
+            '</Project>'
+          )
+          $proj = Join-Path $env:RUNNER_TEMP "FakeProject.vcxproj"
+          [IO.File]::WriteAllText($proj, ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+          "PROJ=$proj" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "`n=== BEFORE: msbuild ARM64 v143 (expected to FAIL - proves #14552) ==="
+          & msbuild $proj /p:Configuration=Release /p:Platform=ARM64 /v:m
+          $code = $LASTEXITCODE
+          Write-Host "BEFORE msbuild exit code: $code"
+          "BEFORE_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Apply - add the fixed-version ARM64 component via the VS installer
+        shell: pwsh
+        run: |
+          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+          Write-Host "Adding component: $env:COMPONENT"
+          Write-Host "  to: $env:VS_INSTALLPATH"
+          $args = @('modify','--installPath', $env:VS_INSTALLPATH, '--add', $env:COMPONENT, '--quiet', '--norestart', '--wait')
+          $p = Start-Process -FilePath $vsInstaller -ArgumentList $args -Wait -PassThru
+          $code = $p.ExitCode
+          Write-Host "vs_installer exit code: $code"   # 0 = ok, 3010 = ok/reboot, other = failure
+          "VS_INSTALL_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # surface whether the catalog even knows this component
+          Write-Host "`n=== recent VS installer log lines mentioning the component / 'could not be found' ==="
+          $logs = Get-ChildItem "$env:TEMP\dd_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 6
+          $notFound = $false
+          foreach ($l in $logs) {
+            $hits = Select-String -Path $l.FullName -Pattern 'could not be found','14\.44\.17\.14\.ARM64','not found','Cannot find' -ErrorAction SilentlyContinue
+            foreach ($h in $hits) { Write-Host ("{0}: {1}" -f $l.Name, $h.Line.Trim()); if ($h.Line -match 'could not be found|not found|Cannot find') { $notFound = $true } }
+          }
+          "COMPONENT_NOTFOUND=$notFound" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: After - re-check ARM64 tools and rebuild
+        shell: pwsh
+        run: |
+          $msvc = Join-Path $env:VS_INSTALLPATH "VC\Tools\MSVC"
+          $t = Get-ChildItem $msvc -Filter $env:TOOLSET_GLOB -ErrorAction SilentlyContinue | Select-Object -First 1
+          $armClAfter = $false
+          if ($t) {
+            $armCl = Join-Path $t.FullName "bin\Hostx64\arm64\cl.exe"
+            Write-Host "14.44 toolset: $($t.FullName)"
+            Write-Host "  arm64 cl after install: $(Test-Path $armCl)"
+            $armClAfter = Test-Path $armCl
+          }
+          "ARM_CL_AFTER=$armClAfter" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "`n=== AFTER: msbuild ARM64 v143 (expected to PASS if the component is the fix) ==="
+          & msbuild $env:PROJ /p:Configuration=Release /p:Platform=ARM64 /v:m
+          $code = $LASTEXITCODE
+          Write-Host "AFTER msbuild exit code: $code"
+          "AFTER_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Summary + verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $before = $env:BEFORE_CODE; $after = $env:AFTER_CODE
+          $verdict = if ($env:ARM_CL_AFTER -eq 'True' -and $after -eq '0' -and $before -ne '0') {
+            "CONFIRMED - component is valid on VS 2026 and fixes the ARM64 v143 build"
+          } elseif ($env:COMPONENT_NOTFOUND -eq 'True' -or $env:ARM_CL_AFTER -ne 'True') {
+            "PROBLEM - component did NOT install (likely not in the VS 2026 catalog); PR needs a different component"
+          } else {
+            "INCONCLUSIVE - see logs above"
+          }
+          $rows = @(
+            "### #14552 / PR #14555 - v143 ARM64 on windows-2025-vs2026",
+            "",
+            "| Check | Result |",
+            "| --- | --- |",
+            "| Runner | windows-2025-vs2026 |",
+            "| Component | ``$env:COMPONENT`` |",
+            "| ARM64 v143 cl present BEFORE | $env:ARM_CL_BEFORE |",
+            "| msbuild ARM64 v143 BEFORE (exit) | $before (non-zero = reproduces #14552) |",
+            "| vs_installer exit code | $env:VS_INSTALL_CODE |",
+            "| installer reported 'not found' | $env:COMPONENT_NOTFOUND |",
+            "| ARM64 v143 cl present AFTER | $env:ARM_CL_AFTER |",
+            "| msbuild ARM64 v143 AFTER (exit) | $after (0 = fixed) |",
+            "| **Verdict** | **$verdict** |"
+          )
+          $rows -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $rows -join "`n" | Write-Host
+          if ($env:ARM_CL_AFTER -ne 'True' -or $after -ne '0') { exit 1 }
