@@ -100,26 +100,43 @@ jobs:
         shell: pwsh
         run: |
           $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
-          Write-Host "Adding component: $env:COMPONENT"
-          Write-Host "  to: $env:VS_INSTALLPATH"
-          $args = @('modify','--installPath', $env:VS_INSTALLPATH, '--add', $env:COMPONENT, '--quiet', '--norestart', '--wait')
-          $p = Start-Process -FilePath $vsInstaller -ArgumentList $args -Wait -PassThru
-          $code = $p.ExitCode
-          Write-Host "vs_installer exit code: $code"   # 0 = ok, 3010 = ok/reboot, other = failure
-          "VS_INSTALL_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          # vs_installer can detach a background setup - wait for it to finish
-          Get-Process -Name 'vs_installer','setup','vs_installershell','vs_bootstrapper' -ErrorAction SilentlyContinue |
-            Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
 
-          # surface whether the catalog even knows this component
-          Write-Host "`n=== recent VS installer log lines mentioning the component / 'could not be found' ==="
-          $logs = Get-ChildItem "$env:TEMP\dd_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 6
+          # -ArgumentList as ONE string => we control quoting (installPath has spaces)
+          function Add-Comp([string]$comp) {
+            Write-Host "`n>>> vs_installer modify --add $comp"
+            $argline = 'modify --installPath "{0}" --add {1} --quiet --norestart --wait' -f $env:VS_INSTALLPATH, $comp
+            Write-Host "    cmdline: $argline"
+            $p = Start-Process -FilePath $vsInstaller -ArgumentList $argline -Wait -PassThru
+            Get-Process -Name 'vs_installer','setup','vs_installershell','vs_bootstrapper' -ErrorAction SilentlyContinue |
+              Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
+            Write-Host "    exit code: $($p.ExitCode)   # 0 ok, 3010 ok/reboot, other=failure"
+            return $p.ExitCode
+          }
+
+          # CONTROL: re-add the known-good x86.x64 fixed component that already ships in the
+          # image toolset. Same command shape - if this also fails it's the harness, not the id.
+          $controlCode = Add-Comp "Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64"
+          "CONTROL_CODE=$controlCode" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # TARGET: the ARM64 sibling the PR adds
+          $code = Add-Comp $env:COMPONENT
+          "VS_INSTALL_CODE=$code" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # dump the newest installer (dd_*) log tails so the exact catalog error is visible
+          Write-Host "`n=== newest VS installer (dd_*) log tails ==="
+          $dirs = @($env:TEMP, $env:TMP, (Join-Path $env:LOCALAPPDATA 'Temp')) | Where-Object { $_ } | Select-Object -Unique
+          $logs = foreach ($d in $dirs) { Get-ChildItem "$d\dd_*.log" -ErrorAction SilentlyContinue }
+          $logs = $logs | Sort-Object LastWriteTime -Descending | Select-Object -First 4
           $notFound = $false
           foreach ($l in $logs) {
-            $hits = Select-String -Path $l.FullName -Pattern 'could not be found','14\.44\.17\.14\.ARM64','not found','Cannot find' -ErrorAction SilentlyContinue
-            foreach ($h in $hits) { Write-Host ("{0}: {1}" -f $l.Name, $h.Line.Trim()); if ($h.Line -match 'could not be found|not found|Cannot find') { $notFound = $true } }
+            Write-Host "`n--- $($l.FullName) (tail 25) ---"
+            $tail = Get-Content $l.FullName -Tail 25 -ErrorAction SilentlyContinue
+            $tail | ForEach-Object { Write-Host $_ }
+            if ($tail -match 'could not be found|not found|Cannot find|is not a valid|No such|invalid') { $notFound = $true }
           }
           "COMPONENT_NOTFOUND=$notFound" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: After - re-check ARM64 tools and rebuild
         if: always()
@@ -149,10 +166,13 @@ jobs:
         shell: pwsh
         run: |
           $before = $env:BEFORE_CODE; $after = $env:AFTER_CODE
+          $ctrlOk = ($env:CONTROL_CODE -eq '0' -or $env:CONTROL_CODE -eq '3010')
           $verdict = if ($env:ARM_CL_AFTER -eq 'True' -and $after -eq '0' -and $before -ne '0') {
-            "CONFIRMED - component is valid on VS 2026 and fixes the ARM64 v143 build"
-          } elseif ($env:COMPONENT_NOTFOUND -eq 'True' -or $env:ARM_CL_AFTER -ne 'True') {
-            "PROBLEM - component did NOT install (likely not in the VS 2026 catalog); PR needs a different component"
+            "CONFIRMED FIX - component installs on VS 2026 and the ARM64 v143 build now passes"
+          } elseif (-not $ctrlOk) {
+            "INCONCLUSIVE - control (x86.x64) also failed (exit $env:CONTROL_CODE), so the test harness is at fault, not the component"
+          } elseif ($env:ARM_CL_AFTER -ne 'True') {
+            "CONFIRMED PROBLEM - control x86.x64 succeeded but ARM64 id rejected (exit $env:VS_INSTALL_CODE); VC.14.44.17.14.ARM64 is not installable on VS 2026 - the PR needs a different component"
           } else {
             "INCONCLUSIVE - see logs above"
           }
@@ -165,8 +185,9 @@ jobs:
             "| Component | ``$env:COMPONENT`` |",
             "| ARM64 v143 cl present BEFORE | $env:ARM_CL_BEFORE |",
             "| msbuild ARM64 v143 BEFORE (exit) | $before (non-zero = reproduces #14552) |",
-            "| vs_installer exit code | $env:VS_INSTALL_CODE |",
-            "| installer reported 'not found' | $env:COMPONENT_NOTFOUND |",
+            "| vs_installer CONTROL x86.x64 (exit) | $env:CONTROL_CODE (0/3010 = command shape is fine) |",
+            "| vs_installer TARGET arm64 (exit) | $env:VS_INSTALL_CODE |",
+            "| installer log flagged invalid/not-found | $env:COMPONENT_NOTFOUND |",
             "| ARM64 v143 cl present AFTER | $env:ARM_CL_AFTER |",
             "| msbuild ARM64 v143 AFTER (exit) | $after (0 = fixed) |",
             "| **Verdict** | **$verdict** |"
