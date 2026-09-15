@@ -1,0 +1,109 @@
+# TEMPORARY - validation aid for #14721.
+# On a hosted windows-11-arm runner: shows the Android cmake set the image ships
+# today (3.18.1 / 3.22.1), then drives the SAME sdkmanager path the build uses
+# (Install-AndroidSDKPackages) to install the Server 2025 set (3.30.5 / 3.31.5 /
+# 4.1.2), proving the install step returns 0, the reporter's test case passes, and
+# reporting the PE arch of each cmake.exe (expected x64 - the SDK channel has no
+# native win-arm64 cmake).
+# Delete this file before opening the PR.
+
+name: Validate Android CMake ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/android-cmake-arm64*'
+
+jobs:
+  android-cmake:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Locate the Android SDK the image ships
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sdkRoot = $env:ANDROID_HOME
+          if (-not $sdkRoot) { $sdkRoot = $env:ANDROID_SDK_ROOT }
+          if (-not $sdkRoot -or -not (Test-Path $sdkRoot)) {
+            throw "No Android SDK on this runner (ANDROID_HOME='$env:ANDROID_HOME')"
+          }
+          $sdkmanager = Join-Path $sdkRoot "cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager not found at $sdkmanager" }
+          "SDK_ROOT=$sdkRoot"       | Out-File $env:GITHUB_ENV -Append
+          "SDKMANAGER=$sdkmanager"  | Out-File $env:GITHUB_ENV -Append
+          Write-Host "SDK root : $sdkRoot"
+          Write-Host "sdkmanager: $sdkmanager"
+
+      - name: Baseline - Android cmake versions present today
+        shell: pwsh
+        run: |
+          $cmakeDir = Join-Path $env:SDK_ROOT "cmake"
+          if (Test-Path $cmakeDir) {
+            Get-ChildItem $cmakeDir -Directory | ForEach-Object { Write-Host "present: $($_.Name)" }
+          } else {
+            Write-Host "no cmake dir yet under the SDK"
+          }
+
+      - name: Install the Server 2025 cmake set via sdkmanager (the build's path)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versions = @("3.30.5", "3.31.5", "4.1.2")
+          foreach ($v in $versions) {
+            Write-Host "=== sdkmanager --install cmake;$v ==="
+            & $env:SDKMANAGER --install "cmake;$v" --sdk_root=$env:SDK_ROOT
+            if ($LASTEXITCODE -ne 0) {
+              throw "sdkmanager failed for cmake;$v with exit code $LASTEXITCODE"
+            }
+          }
+          Write-Host "All three packages installed with exit code 0."
+
+      - name: Reporter's test case - each cmake.exe runs and reports its version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-PEMachine([string] $Path) {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $reader = New-Object IO.BinaryReader($stream)
+              $stream.Position = 0x3C
+              $stream.Position = $reader.ReadInt32() + 4
+              $machine = $reader.ReadUInt16()
+            } finally { $stream.Dispose() }
+            switch ($machine) {
+              0x8664  { "x64" }
+              0xAA64  { "ARM64" }
+              0x014C  { "x86" }
+              default { "0x{0:X4}" -f $machine }
+            }
+          }
+          foreach ($v in @("3.30.5", "3.31.5", "4.1.2")) {
+            $exe = Join-Path $env:SDK_ROOT "cmake\$v\bin\cmake.exe"
+            if (-not (Test-Path $exe)) { throw "MISSING: $exe" }
+            $reported = (& $exe --version | Select-Object -First 1)
+            $arch = Get-PEMachine $exe
+            Write-Host ("cmake;{0} -> {1} [PE: {2}]" -f $v, $reported, $arch)
+            if ($reported -notmatch [regex]::Escape($v)) {
+              throw "version mismatch for cmake;$v : reported '$reported'"
+            }
+          }
+          Write-Host "OK - all three versions install, run, and report the expected version."
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          "### Android CMake ARM64 validation (windows-11-arm)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $cmakeDir = Join-Path $env:SDK_ROOT "cmake"
+          if (Test-Path $cmakeDir) {
+            "Installed cmake versions:" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            Get-ChildItem $cmakeDir -Directory | ForEach-Object {
+              "- $($_.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            }
+          }
