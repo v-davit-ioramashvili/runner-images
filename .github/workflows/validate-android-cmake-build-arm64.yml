@@ -1,0 +1,185 @@
+# TEMPORARY - validation aid for #14721 (build-consistency, not just install).
+# On a hosted windows-11-arm runner:
+#   Stage 1 - read the cmake set from the EDITED toolset and install it (+ an NDK)
+#             via sdkmanager, proving the real toolset edit resolves and installs.
+#   Stage 2a - for each cmake version, configure+build a real arm64-v8a native
+#             library through the NDK CMake toolchain (what Gradle/AGP does),
+#             proving cmake+NDK actually compile native code on arm - including
+#             whether NDK r27 cooperates with CMake 4.1.2.
+#   Stage 2b - build a project with an old cmake_minimum_required(3.4.1) using
+#             4.1.2 to surface the CMake 4.x backward-compat break empirically.
+# The SDK cmake windows package is x64-only, so binaries run emulated on arm;
+# this proves they still produce working builds there.
+# Delete this file before opening the PR.
+
+name: Validate Android CMake Build ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/android-cmake-build-arm64*'
+
+jobs:
+  android-cmake-build:
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+
+    env:
+      CMDLINE_TOOLS_URL: https://dl.google.com/android/repository/commandlinetools-win-9123335_latest.zip
+      TOOLSET: images/windows/toolsets/toolset-win-11-arm64.json
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Ensure a JDK for sdkmanager / cmake toolchain
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Diagnostics
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "JAVA_HOME              = '$env:JAVA_HOME'"
+          Write-Host "ANDROID_HOME           = '$env:ANDROID_HOME'"
+          (& java -version) 2>&1 | ForEach-Object { Write-Host "java: $_" }
+
+      - name: Resolve or bootstrap the Android SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT,
+                          "C:\Android\android-sdk", "C:\Program Files (x86)\Android\android-sdk")
+          $sdkRoot = $candidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "cmdline-tools\latest\bin\sdkmanager.bat")) } | Select-Object -First 1
+          if (-not $sdkRoot) {
+            Write-Host "No usable SDK - bootstrapping cmdline-tools"
+            $sdkRoot = "C:\Android\android-sdk"
+            $dest = Join-Path $sdkRoot "cmdline-tools"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            $zip = Join-Path $env:RUNNER_TEMP "cmdline-tools.zip"
+            Invoke-WebRequest -Uri $env:CMDLINE_TOOLS_URL -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dest -Force
+            Rename-Item (Join-Path $dest "cmdline-tools") (Join-Path $dest "latest")
+          }
+          $sdkmanager = Join-Path $sdkRoot "cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager not found at $sdkmanager" }
+          "SDK_ROOT=$sdkRoot"      | Out-File $env:GITHUB_ENV -Append
+          "SDKMANAGER=$sdkmanager" | Out-File $env:GITHUB_ENV -Append
+          $yes = [string]::Join("`n", (1..50 | ForEach-Object { "y" }))
+          $yes | & $sdkmanager --licenses --sdk_root=$sdkRoot | Out-Null
+          Write-Host "SDK root: $sdkRoot"
+
+      - name: Stage 1 - install the cmake set from the EDITED toolset (+ an NDK)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # the exact cmake set the toolset edit produces - not hardcoded
+          $toolset = Get-Content $env:TOOLSET -Raw | ConvertFrom-Json
+          $cmakePkgs = @($toolset.android.additional_tools | Where-Object { $_ -like "cmake;*" })
+          Write-Host "cmake packages from toolset: $($cmakePkgs -join ', ')"
+          if ($cmakePkgs.Count -eq 0) { throw "no cmake packages found in $env:TOOLSET" }
+
+          # pick the newest NDK for the toolset's default major version
+          $ndkMajor = $toolset.android.ndk.default
+          $avail = & $env:SDKMANAGER --list 2>$null
+          $ndkPkgs = ([regex]::Matches(($avail -join "`n"), "ndk;$ndkMajor\.[0-9.]+")).Value | Sort-Object -Unique
+          if ($ndkPkgs.Count -eq 0) { throw "no ndk;$ndkMajor.* package offered" }
+          $ndkPkg = ($ndkPkgs | Sort-Object { [version]($_.Split(';')[1]) })[-1]
+          Write-Host "NDK package: $ndkPkg"
+
+          $toInstall = @($ndkPkg) + $cmakePkgs
+          $failed = @()
+          foreach ($p in $toInstall) {
+            Write-Host "=== sdkmanager --install $p ==="
+            & $env:SDKMANAGER --install "$p" --sdk_root=$env:SDK_ROOT
+            if ($LASTEXITCODE -ne 0) { $failed += "$p (exit $LASTEXITCODE)" }
+          }
+          if ($failed.Count -gt 0) { throw "install failed: $($failed -join ', ')" }
+
+          $ndkVer = $ndkPkg.Split(';')[1]
+          $ndkDir = Join-Path $env:SDK_ROOT "ndk\$ndkVer"
+          if (-not (Test-Path $ndkDir)) { throw "NDK dir missing: $ndkDir" }
+          "NDK_DIR=$ndkDir" | Out-File $env:GITHUB_ENV -Append
+          "CMAKE_VERSIONS=$(( $cmakePkgs | ForEach-Object { $_.Split(';')[1] } ) -join ',')" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "Stage 1 OK - all packages installed. NDK at $ndkDir"
+
+      - name: Stage 2a - build a real arm64-v8a native lib with each cmake version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = Join-Path $env:RUNNER_TEMP "nativelib"
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          Set-Content (Join-Path $src "hello.cpp") 'extern "C" int add(int a, int b) { return a + b; }'
+          Set-Content (Join-Path $src "CMakeLists.txt") @(
+            'cmake_minimum_required(VERSION 3.22)',
+            'project(hello CXX)',
+            'add_library(hello SHARED hello.cpp)'
+          )
+          $toolchain = Join-Path $env:NDK_DIR "build\cmake\android.toolchain.cmake"
+          if (-not (Test-Path $toolchain)) { throw "NDK toolchain missing: $toolchain" }
+
+          $results = @()
+          foreach ($v in $env:CMAKE_VERSIONS.Split(',')) {
+            $cmakeExe = Join-Path $env:SDK_ROOT "cmake\$v\bin\cmake.exe"
+            $ninja    = Join-Path $env:SDK_ROOT "cmake\$v\bin\ninja.exe"
+            $build    = Join-Path $env:RUNNER_TEMP "b_$v"
+            Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "=== cmake $v : configure ==="
+            & $cmakeExe -G Ninja -S $src -B $build `
+                -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+                -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 `
+                -DCMAKE_MAKE_PROGRAM="$ninja"
+            $cfg = $LASTEXITCODE
+            $bld = 1
+            if ($cfg -eq 0) { & $cmakeExe --build $build; $bld = $LASTEXITCODE }
+            $so = Join-Path $build "libhello.so"
+            $ok = ($cfg -eq 0 -and $bld -eq 0 -and (Test-Path $so))
+            Write-Host ("cmake {0}: configure={1} build={2} libhello.so={3}" -f $v, $cfg, $bld, (Test-Path $so))
+            $results += [pscustomobject]@{ Version=$v; Ok=$ok }
+          }
+          $bad = $results | Where-Object { -not $_.Ok }
+          $results | ForEach-Object { Write-Host ("  {0} -> {1}" -f $_.Version, ($(if($_.Ok){"BUILT"}else{"FAILED"}))) }
+          if ($bad) { throw "native build FAILED for: $(($bad.Version) -join ', ')" }
+          Write-Host "Stage 2a OK - every cmake version compiled an arm64-v8a .so via the NDK toolchain."
+
+      - name: Stage 2b - CMake 4.x backward-compat probe (old cmake_minimum_required)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"   # this is a probe; do not fail the job
+          $has4 = $env:CMAKE_VERSIONS.Split(',') | Where-Object { $_ -like "4.*" } | Select-Object -First 1
+          if (-not $has4) { Write-Host "no cmake 4.x in the set - skipping probe"; exit 0 }
+          $src = Join-Path $env:RUNNER_TEMP "oldmin"
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          Set-Content (Join-Path $src "CMakeLists.txt") @(
+            'cmake_minimum_required(VERSION 3.4.1)',
+            'project(oldmin CXX)',
+            'add_library(oldmin STATIC oldmin.cpp)'
+          )
+          Set-Content (Join-Path $src "oldmin.cpp") 'int f() { return 0; }'
+          $cmakeExe = Join-Path $env:SDK_ROOT "cmake\$has4\bin\cmake.exe"
+          $ninja    = Join-Path $env:SDK_ROOT "cmake\$has4\bin\ninja.exe"
+          $build    = Join-Path $env:RUNNER_TEMP "b_oldmin"
+          Write-Host "=== cmake $has4 configuring a project pinned to cmake_minimum_required(3.4.1) ==="
+          $out = & $cmakeExe -G Ninja -S $src -B $build -DCMAKE_MAKE_PROGRAM="$ninja" 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          Write-Host "PROBE_RESULT: cmake $has4 with min 3.4.1 -> exit $code"
+          "PROBE_EXIT=$code"      | Out-File $env:GITHUB_ENV -Append
+          "PROBE_VER=$has4"       | Out-File $env:GITHUB_ENV -Append
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $s = "$env:GITHUB_STEP_SUMMARY"
+          "### Android CMake build validation (windows-11-arm)" | Out-File $s -Append
+          "" | Out-File $s -Append
+          "- cmake set tested: ``$env:CMAKE_VERSIONS``" | Out-File $s -Append
+          "- NDK: ``$env:NDK_DIR``" | Out-File $s -Append
+          if ($env:PROBE_EXIT) {
+            $verdict = if ($env:PROBE_EXIT -eq "0") { "accepted (no break)" } else { "REJECTED - CMake 4.x compat break confirmed" }
+            "- 4.x old-minimum probe (cmake $env:PROBE_VER, min 3.4.1): exit $env:PROBE_EXIT -> $verdict" | Out-File $s -Append
+          }
