@@ -32,11 +32,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Ensure a JDK for sdkmanager / cmake toolchain
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - name: Provide a JDK (17, win-arm64) for sdkmanager / cmake toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Test-Java($h) { return ($h -and (Test-Path (Join-Path $h "bin\java.exe"))) }
+          $jh = $env:JAVA_HOME
+          if (-not (Test-Java $jh)) {
+            $jh = @($env:JAVA_HOME_17_arm64, $env:JAVA_HOME_17_X64, $env:JAVA_HOME_21_arm64, $env:JAVA_HOME_21_X64) |
+                  Where-Object { Test-Java $_ } | Select-Object -First 1
+          }
+          if (-not (Test-Java $jh)) {
+            Write-Host "No JDK on runner - downloading Microsoft OpenJDK 17 (win-arm64)"
+            $zip = Join-Path $env:RUNNER_TEMP "jdk.zip"
+            Invoke-WebRequest -Uri "https://aka.ms/download-jdk/microsoft-jdk-17-windows-aarch64.zip" -OutFile $zip
+            $dst = Join-Path $env:RUNNER_TEMP "jdk"
+            Expand-Archive $zip -DestinationPath $dst -Force
+            $jh = (Get-ChildItem $dst -Directory | Where-Object { Test-Java $_.FullName } | Select-Object -First 1).FullName
+          }
+          if (-not (Test-Java $jh)) { throw "could not provision a JDK" }
+          "JAVA_HOME=$jh" | Out-File $env:GITHUB_ENV -Append
+          "$jh\bin"       | Out-File $env:GITHUB_PATH -Append
+          & "$jh\bin\java.exe" -version 2>&1 | ForEach-Object { Write-Host "java: $_" }
 
       - name: Diagnostics
         shell: pwsh
