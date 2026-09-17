@@ -1,0 +1,146 @@
+# TEMPORARY - validation aid for the Azure resource-disk boot-delay change.
+# The end-to-end effect (ephemeral-OS boot dropping from ~90s to ~1s) can only be
+# proven on a real ephemeral-OS Azure VM booted from a patched image - hosted runners
+# are resource-disk VMs and boot the stock image, so they cannot show it. What this
+# workflow proves instead are the two mechanism claims the fix rests on, on the real
+# Azure Ubuntu + cloud-init platform:
+#   A. systemd honours x-systemd.device-timeout and stops waiting for a MISSING device
+#      after the configured time (1s), instead of the ~90s default.
+#   B. our cloud-init drop-in makes cc_mounts REGENERATE /etc/fstab with device-timeout=1s
+#      (the exact thing a build-time fstab edit could not survive), keeping the cloudconfig
+#      marker - i.e. the option sticks across cloud-init's per-boot rewrite.
+# The mechanism is arch/version independent; the matrix just exercises the shipped images.
+# Delete this file before opening the PR.
+
+name: Validate resource-disk mount timeout
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/resource-disk-timeout*'
+
+jobs:
+  resource-disk-timeout:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - Azure VM, cloud-init present, current /mnt fstab line
+        run: |
+          set -uo pipefail
+          echo "uname -m : $(uname -m)"
+          lsb_release -a || true
+          echo "cloud-init: $(cloud-init --version 2>&1 || echo 'NOT FOUND')"
+          echo "--- current /mnt entry (stock image: has comment=cloudconfig, no device-timeout) ---"
+          grep -n '/mnt' /etc/fstab || echo "no /mnt entry in /etc/fstab"
+          echo "--- resource disk actually present on this hosted runner ---"
+          ls -l /dev/disk/cloud/azure_resource* 2>/dev/null || echo "no azure_resource symlink"
+          findmnt /mnt || true
+
+      - name: 'Claim A - systemd stops waiting for a missing device at the configured timeout'
+        run: |
+          set -uo pipefail
+          FAKE=/dev/disk/cloud/validate-nonexistent
+          MP=/tmp/rdtest
+          sudo mkdir -p "$MP"
+
+          measure() {
+            local timeout="$1" unit elapsed
+            echo "$FAKE $MP auto nofail,x-systemd.device-timeout=${timeout} 0 0" | sudo tee /tmp/fstab.add >/dev/null
+            sudo bash -c "cat /tmp/fstab.add >> /etc/fstab"
+            sudo systemctl daemon-reload
+            unit=$(systemd-escape -p --suffix=mount "$MP")
+            local start end
+            start=$(date +%s.%N)
+            sudo systemctl start "$unit" >/dev/null 2>&1 || true   # cannot succeed (device absent)
+            end=$(date +%s.%N)
+            elapsed=$(awk "BEGIN{printf \"%.1f\", $end - $start}")
+            # cleanup this entry before the next measurement
+            sudo sed -i "\|validate-nonexistent|d" /etc/fstab
+            sudo systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+            sudo systemctl daemon-reload
+            echo "$elapsed"
+          }
+
+          t1=$(measure 1s)
+          t5=$(measure 5s)
+          echo "device-timeout=1s -> settled in ${t1}s"
+          echo "device-timeout=5s -> settled in ${t5}s"
+          echo "T1_SETTLE=$t1" >> "$GITHUB_ENV"
+          echo "T5_SETTLE=$t5" >> "$GITHUB_ENV"
+
+          # 1s must be well under the ~90s default; the 5s run proves the wait tracks the knob
+          awk "BEGIN{exit !($t1 < 10)}"       || { echo 'FAIL: 1s timeout did not short-circuit'; exit 1; }
+          awk "BEGIN{exit !($t5 > $t1)}"      || { echo 'FAIL: wait did not scale with the timeout'; exit 1; }
+          echo 'PASS: a missing device is abandoned at the configured timeout, not the ~90s default'
+
+      - name: 'Claim B - cloud-init regenerates /etc/fstab WITH our option (survives the rewrite)'
+        run: |
+          set -uo pipefail
+          sudo cp /etc/fstab /tmp/fstab.orig
+
+          echo "--- /mnt line BEFORE our drop-in ---"
+          before=$(grep -E '(/mnt|azure_resource)' /etc/fstab || true)
+          echo "${before:-<none>}"
+
+          # the exact drop-in the image ships from configure-environment.sh
+          sudo mkdir -p /etc/cloud/cloud.cfg.d
+          sudo tee /etc/cloud/cloud.cfg.d/99-azure-resource-disk-timeout.cfg >/dev/null <<'EOF'
+          mounts:
+            - [ ephemeral0, /mnt, auto, "defaults,nofail,x-systemd.device-timeout=1s,_netdev", "0", "2" ]
+          EOF
+
+          echo "--- re-running cloud-init's mounts module (as it runs at first boot) ---"
+          sudo cloud-init single --name mounts --frequency always 2>&1 \
+            || sudo cloud-init single --name cc_mounts --frequency always 2>&1 \
+            || echo "cloud-init single returned non-zero (output above)"
+
+          echo "--- /mnt line AFTER our drop-in + cc_mounts re-run ---"
+          after=$(grep -E '(/mnt|azure_resource)' /etc/fstab || true)
+          echo "${after:-<none>}"
+          echo "RESULT_LINE=$after" >> "$GITHUB_ENV"
+
+          mnt_line=$(grep -E '/mnt' /etc/fstab | grep -E 'azure_resource|ephemeral' | head -1)
+          echo "$mnt_line" | grep -q 'x-systemd.device-timeout=1s' \
+            || { echo 'FAIL: cloud-init did not write device-timeout=1s'; sudo cp /tmp/fstab.orig /etc/fstab; exit 1; }
+          echo "$mnt_line" | grep -q 'comment=cloudconfig' \
+            || { echo 'FAIL: cloud-init did not mark the line (comment=cloudconfig missing)'; sudo cp /tmp/fstab.orig /etc/fstab; exit 1; }
+          echo 'PASS: cloud-init owns the line and regenerated it carrying our 1s timeout'
+
+          # restore so nothing about this runner is left altered
+          sudo cp /tmp/fstab.orig /etc/fstab
+          sudo rm -f /etc/cloud/cloud.cfg.d/99-azure-resource-disk-timeout.cfg
+          sudo systemctl daemon-reload
+
+      - name: Restore fstab (safety net)
+        if: always()
+        run: |
+          set -uo pipefail
+          sudo sed -i "\|validate-nonexistent|d" /etc/fstab || true
+          [ -f /tmp/fstab.orig ] && sudo cp /tmp/fstab.orig /etc/fstab || true
+          sudo rm -f /etc/cloud/cloud.cfg.d/99-azure-resource-disk-timeout.cfg || true
+          sudo systemctl daemon-reload || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Resource-disk mount timeout - ${{ matrix.runner }}"
+            echo ""
+            echo "| Claim | Result |"
+            echo "| --- | --- |"
+            echo "| A. missing device settles at device-timeout=1s | ${T1_SETTLE:-n/a}s (5s knob -> ${T5_SETTLE:-n/a}s) |"
+            echo "| B. cloud-init regenerated /mnt with our option | ${RESULT_LINE:-n/a} |"
+            echo ""
+            echo "> End-to-end ~90s -> ~1s on an ephemeral-OS boot still needs a real ephemeral-OS Azure VM from a patched image."
+          } >> "$GITHUB_STEP_SUMMARY"
