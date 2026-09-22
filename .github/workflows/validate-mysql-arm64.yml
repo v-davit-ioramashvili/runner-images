@@ -1,0 +1,136 @@
+# TEMPORARY - validation aid for #14736.
+# Proves the MySQL 8.4 bump installs and works on a real hosted windows-11-arm
+# runner. MySQL ships only a winx64 MSI, so arm64 runs it under x64 emulation -
+# the same way the current 8.0 is installed today. This runs the actual
+# Install-MysqlCli.ps1 from this branch (which also enforces the Authenticode
+# subject check and the Databases/MySQL Pester test) against the arm64 toolset,
+# then confirms `mysql -V` reports 8.4.
+#
+# The base image already ships MySQL 8.0, so we uninstall it first to mimic a
+# clean build - otherwise the script's `C:\PROGRA~1\MySQL`[0] dir pick and the
+# session PATH would still resolve to 8.0 and give a misleading result.
+# Delete this file before opening the PR.
+
+name: Validate MySQL ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/mysql-arm64*'
+
+jobs:
+  mysql:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+
+    env:
+      IMAGE_FOLDER: ${{ github.workspace }}\image
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - what the image ships today
+        shell: pwsh
+        run: |
+          Write-Host "OS arch: $env:PROCESSOR_ARCHITECTURE"
+          $mysql = Get-Command mysql -ErrorAction SilentlyContinue
+          if ($mysql) {
+            Write-Host "mysql resolves to: $($mysql.Source)"
+            Write-Host ((mysql -V) -join "`n")
+          } else {
+            Write-Host "mysql not on PATH"
+          }
+          Get-ChildItem "C:\Program Files\MySQL" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "present: $($_.FullName)" }
+
+      - name: Uninstall the pre-shipped MySQL so we validate a clean install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $roots = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+          )
+          $products = Get-ChildItem $roots -ErrorAction SilentlyContinue |
+            Where-Object { $_.GetValue('DisplayName') -like 'MySQL Server*' }
+          foreach ($p in $products) {
+            $code = Split-Path $p.Name -Leaf
+            Write-Host "Uninstalling $($p.GetValue('DisplayName')) ($code)"
+            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait
+          }
+          # remove any leftover install dir and its PATH entry so nothing resolves to 8.0
+          Remove-Item "C:\Program Files\MySQL" -Recurse -Force -ErrorAction SilentlyContinue
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+          $cleaned = ($machinePath -split ';' | Where-Object { $_ -notmatch 'MySQL' }) -join ';'
+          [Environment]::SetEnvironmentVariable("PATH", $cleaned, "Machine")
+          Write-Host "Remaining MySQL dirs:"
+          Get-ChildItem "C:\Program Files\MySQL" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.FullName)" }
+
+      - name: Stage the build environment the packer template provides
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Get-ToolsetContent reads $env:IMAGE_FOLDER\toolset.json; use the arm64 toolset
+          New-Item -ItemType Directory -Path $env:IMAGE_FOLDER -Force | Out-Null
+          Copy-Item .\images\windows\toolsets\toolset-win-11-arm64.json (Join-Path $env:IMAGE_FOLDER "toolset.json") -Force
+          $ver = (Get-Content (Join-Path $env:IMAGE_FOLDER "toolset.json") -Raw | ConvertFrom-Json).mysql.version
+          Write-Host "toolset pins mysql: $ver"
+
+          # the build runs these scripts with the helpers loaded and the tests
+          # staged under C:\image\tests - reproduce that here
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+          New-Item -ItemType Directory -Path C:\image\tests -Force | Out-Null
+          Copy-Item .\images\windows\scripts\tests\*.ps1 C:\image\tests -Force
+
+      - name: Run the real Install-MysqlCli.ps1 from this branch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+
+          $start = Get-Date
+          # this exercises: winx64 MSI download, the -ExpectedSubject Authenticode
+          # check, PATH registration, and the Databases/MySQL Pester test
+          . .\images\windows\scripts\build\Install-MysqlCli.ps1
+          Write-Host "install took $([int]((Get-Date) - $start).TotalSeconds)s"
+
+      - name: Confirm 8.4 is installed and runs on arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = (Get-Content (Join-Path $env:IMAGE_FOLDER "toolset.json") -Raw | ConvertFrom-Json).mysql.version
+          Write-Host "expected major.minor: $expected"
+
+          $dir = Get-ChildItem "C:\Program Files\MySQL" -Directory | Select-Object -First 1
+          $exe = Join-Path $dir.FullName "bin\mysql.exe"
+          Write-Host "installed dir: $($dir.FullName)"
+
+          $banner = (& $exe -V) -join "`n"
+          Write-Host $banner
+          if ($banner -notmatch [regex]::Escape($expected)) {
+            throw "mysql -V does not report $expected"
+          }
+
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+          if ($machinePath -notmatch 'MySQL') {
+            throw "MySQL bin was not added to the machine PATH"
+          }
+          Write-Host "OK - MySQL $expected installed and on the machine PATH"
+
+      - name: Record the supply chain posture of the downloaded installer
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem "$env:TEMP\mysql-*.msi", "$env:TEMP\*\mysql-*.msi" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "File:   $($_.Name)"
+            Write-Host "SHA256: $((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
+            $sig = Get-AuthenticodeSignature $_.FullName
+            Write-Host "Signature status:  $($sig.Status)"
+            Write-Host "Signature subject: $($sig.SignerCertificate.Subject)"
+          }
