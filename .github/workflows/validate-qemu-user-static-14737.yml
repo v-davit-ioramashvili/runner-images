@@ -1,0 +1,92 @@
+# TEMPORARY - validation aid for #14737 (Add qemu-user-static).
+# Proves, on stock hosted ubuntu-latest, the two claims in our reply:
+#   1. A job-level `container:` on a foreign --platform FAILS at "Initialize containers",
+#      before any step runs -> no runtime step can fix it.
+#   2. The usual workaround (docker/setup-qemu-action) fixes ONLY step-level cross-arch
+#      (docker run --platform inside a native job), because it runs as a step.
+# Together these show the job-level container: case genuinely needs binfmt/QEMU baked
+# into the host image -> exactly what the feature request asks for.
+# Delete this file before opening any PR.
+
+name: Validate qemu-user-static #14737
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/qemu-user-static*'
+
+jobs:
+  # --- Claim 1: job-level foreign-arch container: cannot start -------------------
+  # ubuntu:24.04 publishes an s390x manifest, so image-pull is NOT the variable here;
+  # the only reason it can't start is the missing binfmt/QEMU on the host.
+  # Expected result: this job FAILS during "Initialize containers" and the step below
+  # never runs. continue-on-error keeps the run going so the report job can read it.
+  foreign_container:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    container:
+      image: ubuntu:24.04
+      options: --platform=linux/s390x
+    steps:
+      - name: This step should NEVER execute if our claim is correct
+        run: |
+          echo "STEP RAN — arch is $(uname -m)"
+          echo "If you see this, the foreign-arch container started and our claim is WRONG."
+
+  # --- Claim 2: step-level cross-arch DOES work via setup-qemu-action ------------
+  step_level_workaround:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Baseline — no s390x binfmt on the host by default
+        run: |
+          echo "host arch: $(uname -m)"
+          echo "--- registered binfmt handlers before setup ---"
+          ls /proc/sys/fs/binfmt_misc/ 2>/dev/null || echo "(none / not mounted)"
+          echo "--- try a foreign-arch container BEFORE setup (expected to fail) ---"
+          if docker run --rm --platform=linux/s390x ubuntu:24.04 uname -m; then
+            echo "UNEXPECTED: s390x ran with no setup"
+          else
+            echo "EXPECTED: docker run --platform=linux/s390x failed before setup"
+          fi
+
+      - name: Register binfmt/QEMU on the host (the runtime workaround)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Same foreign-arch container now works (step-level)
+        run: |
+          echo "--- registered binfmt handlers after setup ---"
+          ls /proc/sys/fs/binfmt_misc/ | grep -i qemu || true
+          echo "--- run the s390x container now ---"
+          out="$(docker run --rm --platform=linux/s390x ubuntu:24.04 uname -m)"
+          echo "s390x container reports: $out"
+          test "$out" = "s390x" || { echo "expected s390x"; exit 1; }
+          echo "Step-level cross-arch works AFTER a setup step — as our reply states."
+
+  # --- Verdict: read the actual results and write them to the run summary --------
+  report:
+    needs: [foreign_container, step_level_workaround]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize what actually happened
+        run: |
+          fc='${{ needs.foreign_container.result }}'
+          sl='${{ needs.step_level_workaround.result }}'
+          {
+            echo "## #14737 validation result"
+            echo ""
+            echo "| Claim | Expected | Actual job result |"
+            echo "|---|---|---|"
+            echo "| Job-level \`container:\` on foreign --platform starts before steps and cannot be fixed at runtime | job **fails** at Initialize containers | \`$fc\` |"
+            echo "| Step-level cross-arch works via setup-qemu-action | job **succeeds** | \`$sl\` |"
+            echo ""
+            if [ "$fc" = "failure" ] && [ "$sl" = "success" ]; then
+              echo "✅ Both claims confirmed: the job-level container: case needs host binfmt/QEMU (i.e. the requested package), while step-level is already covered by the runtime workaround."
+            else
+              echo "⚠️ Result does not match the reply — re-check before posting."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "foreign_container=$fc  step_level_workaround=$sl"
