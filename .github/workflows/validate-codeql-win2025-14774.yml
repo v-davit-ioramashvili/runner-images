@@ -19,9 +19,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-2022, variant: default }
-          - { os: windows-2025, variant: default }
-          - { os: windows-2025, variant: devdrive }
+          - { os: windows-2022, variant: default, gen: "Visual Studio 17 2022" }
+          - { os: windows-2025, variant: default, gen: "Visual Studio 18 2026" }
+          - { os: windows-2025, variant: devdrive, gen: "Visual Studio 18 2026" }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
     name: ${{ matrix.os }} / ${{ matrix.variant }}
@@ -61,10 +61,11 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 --branch 20250512.1 https://github.com/abseil/abseil-cpp "$env:WORK_ROOT\src"
-          cmake -S "$env:WORK_ROOT\src" -B "$env:WORK_ROOT\build" -G "Visual Studio 17 2022" -A x64 `
+          cmake -S "$env:WORK_ROOT\src" -B "$env:WORK_ROOT\build" -G "${{ matrix.gen }}" -A x64 `
             -DCMAKE_CXX_STANDARD=17 -DABSL_BUILD_TESTING=OFF `
             "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /MP"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Select-String -Path "$env:WORK_ROOT\build\CMakeCache.txt" -Pattern 'CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:' | ForEach-Object Line
 
       - name: Write measure script
         shell: pwsh
