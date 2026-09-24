@@ -1,0 +1,68 @@
+# TEMPORARY - validation aid for #14777.
+# Confirms /tmp is a tmpfs (tmp.mount) on ubuntu-26.04 but on the root disk on 24.04,
+# shows the size/quota limits, and checks that masking tmp.mount + unmounting restores 24.04 behavior.
+
+name: Validate /tmp tmpfs (#14777)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/tmp-tmpfs-14777*'
+
+jobs:
+  tmp:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Inspect /tmp
+        run: |
+          set -x
+          cat /etc/os-release | grep PRETTY
+          systemctl --version | head -1
+          free -h
+          df -hT / /tmp /var/tmp /mnt || true
+          findmnt -no SOURCE,FSTYPE,SIZE,OPTIONS /tmp || echo "/tmp is not a separate mount"
+          systemctl status tmp.mount --no-pager || true
+          systemctl is-enabled tmp.mount || true
+          systemctl cat tmp.mount --no-pager || true
+          ls -la /etc/systemd/system/tmp.mount /usr/lib/systemd/system/tmp.mount || true
+          grep -E '\s/tmp\s' /etc/fstab || echo "no /tmp in fstab"
+          echo "RUNNER_TEMP=$RUNNER_TEMP TMPDIR=${TMPDIR:-unset}"
+          sudo du -sh /tmp 2>/dev/null || true
+
+      - name: Write 9G to /tmp as runner
+        continue-on-error: true
+        run: |
+          dd if=/dev/zero of=/tmp/big bs=1M count=9000 status=none && echo "OK: 9G written" ; rc=$?
+          ls -lh /tmp/big || true
+          rm -f /tmp/big
+          exit $rc
+
+      - name: Write 9G to /tmp as root
+        continue-on-error: true
+        run: |
+          sudo dd if=/dev/zero of=/tmp/bigroot bs=1M count=9000 status=none && echo "OK: 9G written" ; rc=$?
+          sudo ls -lh /tmp/bigroot || true
+          sudo rm -f /tmp/bigroot
+          exit $rc
+
+      - name: Workaround - mask tmp.mount and unmount
+        if: startsWith(matrix.runner, 'ubuntu-26.04')
+        run: |
+          sudo systemctl mask tmp.mount
+          sudo umount -l /tmp
+          df -hT /tmp
+          findmnt /tmp || echo "/tmp is now on the root disk"
+          ls -ld /tmp
+
+      - name: Write 9G to /tmp after workaround
+        if: startsWith(matrix.runner, 'ubuntu-26.04')
+        run: |
+          dd if=/dev/zero of=/tmp/big bs=1M count=9000 status=none
+          ls -lh /tmp/big
+          rm -f /tmp/big
