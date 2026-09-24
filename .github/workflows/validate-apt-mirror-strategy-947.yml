@@ -11,7 +11,8 @@
 #   B. Time-to-failover when priority:1 is a black hole, under the shipped acquire
 #      settings vs apt's defaults - i.e. what #14643 actually bought us.
 #   C. Whether time-to-failover scales with the number of index items, which is the
-#      premise #14719 rests on.
+#      premise #14719 rests on. C uses a dead IP; C2 uses a mirror that accepts the
+#      connection and never answers, which is closer to a degraded node behind an LB.
 #   D. Whether a slow-but-progressing mirror is bounded at all. Acquire::*::Timeout is
 #      an inactivity timeout, so the expectation is that it is NOT, and this measures it.
 # Nothing here touches the runner's own /etc/apt - every measurement runs against a
@@ -45,7 +46,7 @@ jobs:
     steps:
       - name: Context - image, arch, region, and the mirror list as shipped
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           echo "runner label : ${{ matrix.runner }}"
           echo "uname -m     : $(uname -m)"
           lsb_release -ds || true
@@ -61,14 +62,14 @@ jobs:
 
       - name: Ensure dig is present (before any mirror tampering)
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           command -v dig >/dev/null || sudo apt-get install -y -qq bind9-dnsutils >/dev/null 2>&1 \
             || sudo apt-get install -y -qq dnsutils >/dev/null 2>&1
           command -v dig >/dev/null && echo "dig present" || echo "dig unavailable, falling back to getent"
 
       - name: 'Claim A - resolve every endpoint and attribute each address to an owner'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           OUT="$RUNNER_TEMP/endpoints"
           mkdir -p "$OUT"
 
@@ -131,7 +132,7 @@ jobs:
 
       - name: 'Claim A2 - do the endpoints diverge on the network path, or only at the last hop'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           command -v tracepath >/dev/null || sudo apt-get install -y -qq iputils-tracepath >/dev/null 2>&1 || true
           for h in azure.archive.ubuntu.com archive.ubuntu.com; do
             echo "=== path to $h ==="
@@ -148,12 +149,12 @@ jobs:
           - ubuntu-26.04
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Build a scratch apt tree so the runner's own apt is never touched
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           W="$RUNNER_TEMP/aptlab"
           mkdir -p "$W/lists/partial" "$W/cache/archives/partial"
           echo "APTLAB=$W" >> "$GITHUB_ENV"
@@ -161,10 +162,15 @@ jobs:
           echo "scratch tree: $W"
           echo "--- effective acquire settings this image ships ---"
           apt-config dump Acquire::Retries Acquire::http::Timeout Acquire::https::Timeout
+          # Older images showed Timeout 600, which nothing in this repo writes. Find the file.
+          echo "--- apt.conf files that set Retries or Timeout (last in filename order wins) ---"
+          grep -rnE "Retries|Timeout" /etc/apt/apt.conf /etc/apt/apt.conf.d/ 2>/dev/null || echo "none"
+          echo "--- image ---"
+          echo "${ImageOS:-unknown} ${ImageVersion:-unknown}"
 
       - name: 'Claim B - time-to-failover when priority:1 is a black hole'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           W="$APTLAB"
 
           # 192.0.2.0/24 is TEST-NET-1 and must never be routed. DROP (not REJECT) so the
@@ -206,7 +212,7 @@ jobs:
 
       - name: 'Claim C - does time-to-failover scale with the number of index items'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           W="$APTLAB"
           sudo iptables -I OUTPUT -d 192.0.2.1 -j DROP
           trap 'sudo iptables -D OUTPUT -d 192.0.2.1 -j DROP 2>/dev/null || true' EXIT
@@ -250,7 +256,7 @@ jobs:
 
       - name: 'Claim D - is a slow-but-progressing mirror bounded by anything'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           W="$APTLAB"
 
           # A mirror that never stops sending, but sends almost nothing. Acquire::*::Timeout is
@@ -265,7 +271,9 @@ jobs:
               def do_GET(self):
                   self.send_response(200)
                   self.send_header("Content-Type", "application/octet-stream")
-                  self.send_header("Content-Length", "100000000")
+                  # Must stay under Acquire::MaxReleaseFileSize (10 MB), or apt rejects the
+                  # InRelease before reading it and the test measures nothing.
+                  self.send_header("Content-Length", "5000000")
                   self.end_headers()
                   try:
                       while True:
@@ -304,11 +312,13 @@ jobs:
             -o Acquire::Retries=1 \
             -o Acquire::http::Timeout=15 \
             -o Acquire::https::Timeout=15 \
-            >/dev/null 2>&1
+            > "$W/slow.log" 2>&1
           rc=$?
           end=$(date +%s)
           elapsed=$((end-start))
           echo "  trickling mirror, Timeout=15, outer cap 300s -> apt ran ${elapsed}s (exit $rc)"
+          echo "  --- apt output (tail) ---"
+          tail -5 "$W/slow.log" | sed 's/^/    /'
           if [ "$elapsed" -ge 290 ]; then
             echo "  RESULT: UNBOUNDED. Acquire::*::Timeout did not fire against a progressing mirror."
             echo "          A slow mirror cannot be bounded by apt's timeouts - only by fetching"
@@ -317,13 +327,106 @@ jobs:
             echo "  RESULT: apt gave up after ${elapsed}s - something does bound this case."
           fi
 
-      - name: Confirm the runner's own apt was never modified
+      - name: Confirm the runner's own apt was never modified (failover-behaviour)
         if: always()
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           echo "--- /etc/apt/apt-mirrors.txt (must be unchanged) ---"
           cat /etc/apt/apt-mirrors.txt 2>/dev/null || echo "(absent)"
           echo "--- effective acquire settings (must match the image) ---"
           apt-config dump Acquire::Retries Acquire::http::Timeout Acquire::https::Timeout
           echo "--- leftover iptables OUTPUT rules (must be none) ---"
           sudo iptables -S OUTPUT | grep -F "192.0.2.1" || echo "none"
+
+  # Claim C2. Claim C black-holes priority:1, and a dead IP fails at connect time - apt
+  # appears to pay for that once per run, not per item. #14594 looked different: the
+  # Azure LB accepted connections and a degraded node behind it never answered, and the
+  # logs show Ign lines against azure for every index item. This reproduces THAT: a
+  # priority:1 that accepts the TCP connection and then says nothing.
+  degraded-node-failover:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - name: 'Claim C2 - failover cost per index item when priority:1 accepts and goes silent'
+        run: |
+          set +e -uo pipefail
+          W="$RUNNER_TEMP/aptlab2"
+          mkdir -p "$W/lists/partial" "$W/cache/archives/partial"
+          SUITE=$(lsb_release -cs)
+
+          cat > "$W/silent.py" <<'PY'
+          import socketserver, time
+
+          class Silent(socketserver.BaseRequestHandler):
+              def handle(self):
+                  try:
+                      self.request.recv(65536)   # read the request, then never answer
+                      time.sleep(3600)
+                  except Exception:
+                      pass
+
+          class Server(socketserver.ThreadingTCPServer):
+              allow_reuse_address = True
+              daemon_threads = True
+
+          with Server(("127.0.0.1", 8898), Silent) as s:
+              s.serve_forever()
+          PY
+          python3 "$W/silent.py" &
+          SILENT_PID=$!
+          trap 'kill $SILENT_PID 2>/dev/null || true' EXIT
+          sleep 2
+
+          printf 'http://127.0.0.1:8898/ubuntu/\tpriority:1\n'      >  "$W/mirrors.txt"
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:2\n' >> "$W/mirrors.txt"
+
+          measure() {
+            local label start end rc
+            label="$1"
+            shift
+            start=$(date +%s)
+            sudo timeout 1800 apt-get update \
+              -o Dir::Etc::sourcelist="$W/sources.list" \
+              -o Dir::Etc::sourceparts=/dev/null \
+              -o Dir::State::Lists="$W/lists" \
+              -o Dir::Cache="$W/cache" \
+              -o Acquire::Retries=1 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              "$@" > "$W/run.log" 2>&1
+            rc=$?
+            end=$(date +%s)
+            printf '  %-58s %5ss  exit %-3s  items sent to p1: %s\n' "$label" "$((end-start))" "$rc" \
+              "$(grep -c '127.0.0.1:8898' "$W/run.log")"
+            sudo rm -rf "$W/lists" && sudo mkdir -p "$W/lists/partial"
+          }
+
+          echo "priority:1 accepts TCP and never answers, priority:2 healthy, Retries=1 Timeout=15:"
+          echo "deb mirror+file:$W/mirrors.txt $SUITE main" > "$W/sources.list"
+          measure "1 suite, 1 component"
+
+          echo "deb mirror+file:$W/mirrors.txt $SUITE main universe restricted multiverse" > "$W/sources.list"
+          measure "1 suite, 4 components"
+          measure "1 suite, 4 components, DEP-11 off (#14719)" \
+            -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false
+
+          # The layout the images actually ship: 4 suites x 4 components.
+          : > "$W/sources.list"
+          for s in "$SUITE" "$SUITE-updates" "$SUITE-backports" "$SUITE-security"; do
+            echo "deb mirror+file:$W/mirrors.txt $s main universe restricted multiverse" >> "$W/sources.list"
+          done
+          measure "4 suites x 4 components (shipped layout)"
+          measure "4 suites x 4 components, DEP-11 off (#14719)" \
+            -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false
+
+          echo "--- sample of the last run's output ---"
+          grep -m8 "127.0.0.1:8898\|archive.ubuntu.com" "$W/run.log" | sed 's/^/    /'
