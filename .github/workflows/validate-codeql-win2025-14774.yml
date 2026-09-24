@@ -1,0 +1,113 @@
+# TEMPORARY - validation aid for #14774 (CodeQL-traced MSVC build ~2x slower on windows-2025).
+# Builds the same C++ project (abseil-cpp, pinned) with MSBuild /m + /MP, first plain, then under
+# CodeQL manual-mode tracing, on windows-2022 vs windows-2025. CPU and disk counters are sampled
+# during each build. A third leg runs windows-2025 with build dir + CodeQL DB on a Dev Drive to
+# test the "C: disk I/O is the bottleneck" theory (see #12647: no D: drive on windows-2025).
+# Delete this file before opening any PR.
+
+name: Validate CodeQL Win2025 (#14774)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/codeql-win2025-14774*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, variant: default }
+          - { os: windows-2025, variant: default }
+          - { os: windows-2025, variant: devdrive }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    name: ${{ matrix.os }} / ${{ matrix.variant }}
+
+    steps:
+      - name: Dev Drive (devdrive leg only)
+        if: matrix.variant == 'devdrive'
+        uses: samypr100/setup-dev-drive@v4
+        with:
+          drive-size: 20GB
+          drive-format: ReFS
+
+      - name: Pick work root
+        shell: pwsh
+        run: |
+          $root = if ($env:DEV_DRIVE) { "$env:DEV_DRIVE\work" } else { "$env:RUNNER_TEMP\work" }
+          New-Item -ItemType Directory -Force $root | Out-Null
+          "WORK_ROOT=$root" >> $env:GITHUB_ENV
+          Write-Host "Image: $env:ImageOS $env:ImageVersion"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE  RUNNER_TEMP: $env:RUNNER_TEMP  WORK_ROOT: $root"
+          Write-Host "Logical CPUs: $([Environment]::ProcessorCount)"
+          Get-Volume | Where-Object DriveLetter | Format-Table DriveLetter, FileSystem, @{n='SizeGB';e={[math]::Round($_.Size/1GB)}}, @{n='FreeGB';e={[math]::Round($_.SizeRemaining/1GB)}} -AutoSize
+          Get-PhysicalDisk | Format-Table FriendlyName, MediaType, BusType, @{n='SizeGB';e={[math]::Round($_.Size/1GB)}} -AutoSize
+          Get-MpPreference | Select-Object DisableRealtimeMonitoring, ExclusionPath | Format-List
+
+      - name: Disk micro-benchmark on work root (diskspd, 4K random 70/30, 20s)
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\diskspd.zip"
+          Invoke-WebRequest https://github.com/microsoft/diskspd/releases/download/v2.2/DiskSpd.ZIP -OutFile $zip
+          Expand-Archive $zip "$env:RUNNER_TEMP\diskspd" -Force
+          $exe = "$env:RUNNER_TEMP\diskspd\amd64\diskspd.exe"
+          & $exe -c2G -d20 -r -w30 -t4 -o8 -b4K -Sh -L "$env:WORK_ROOT\io.dat" | Select-String -Pattern 'total:' | Select-Object -First 3
+          Remove-Item "$env:WORK_ROOT\io.dat" -Force
+
+      - name: Get abseil-cpp (pinned) and configure
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch 20250512.1 https://github.com/abseil/abseil-cpp "$env:WORK_ROOT\src"
+          cmake -S "$env:WORK_ROOT\src" -B "$env:WORK_ROOT\build" -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_CXX_STANDARD=17 -DABSL_BUILD_TESTING=OFF `
+            "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /MP"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Write measure script
+        shell: pwsh
+        run: |
+          @'
+          param([string]$Label)
+          $csv = Join-Path $env:RUNNER_TEMP "$Label-perf.csv"
+          $counters = '"\Processor(_Total)\% Processor Time" "\PhysicalDisk(_Total)\% Idle Time" "\PhysicalDisk(_Total)\Avg. Disk Queue Length" "\PhysicalDisk(_Total)\Avg. Disk sec/Write"'
+          $tp = Start-Process typeperf -ArgumentList "$counters -si 2 -y -o `"$csv`"" -PassThru -WindowStyle Hidden
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cmake --build "$env:WORK_ROOT\build" --config Release -- /m /nologo /v:m /clp:ErrorsOnly
+          $code = $LASTEXITCODE
+          $sw.Stop()
+          Stop-Process -Id $tp.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 2
+          $rows = Import-Csv $csv
+          $cols = $rows[0].PSObject.Properties.Name | Select-Object -Skip 1
+          $summary = foreach ($c in $cols) {
+            $v = $rows | ForEach-Object { $_.$c } | Where-Object { $_ -match '^\s*[\d\.]+\s*$' } | ForEach-Object { [double]$_ }
+            [pscustomobject]@{ Counter = ($c -replace '^\\\\[^\\]+', ''); Avg = [math]::Round(($v | Measure-Object -Average).Average, 3); Samples = $v.Count }
+          }
+          Write-Host "=== $Label : build $([math]::Round($sw.Elapsed.TotalSeconds))s (exit $code) on $env:ImageOS"
+          $summary | Format-Table -AutoSize | Out-String | Write-Host
+          "| $env:ImageOS | ${{ matrix.variant }} | $Label | $([math]::Round($sw.Elapsed.TotalSeconds))s | " + (($summary | ForEach-Object { $_.Avg }) -join ' | ') + " |" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+          '@ | Set-Content "$env:RUNNER_TEMP\measure.ps1"
+          "| Image | Variant | Build | Time | CPU % | Disk idle % | Disk queue | Disk sec/write |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|---|---|---|---|---|---|" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Build WITHOUT CodeQL
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP\measure.ps1" -Label plain'
+
+      - name: Clean build outputs
+        shell: pwsh
+        run: cmake --build "$env:WORK_ROOT\build" --config Release --target clean
+
+      - name: CodeQL init (manual build mode)
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+          db-location: ${{ env.WORK_ROOT }}\codeql-db
+
+      - name: Build WITH CodeQL tracing
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP\measure.ps1" -Label codeql'
