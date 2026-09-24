@@ -1,7 +1,8 @@
 # TEMPORARY - validation aid for #14780.
-# Checks whether libcrypt-dev (crypt.h + libcrypt.so) is present on each Ubuntu
-# image, why (libc6-dev dependency), and whether a crypt() program compiles and
-# links before/after installing it. Delete this file before opening the PR.
+# Runs the same install loop as install-apt-common.sh against the branch's
+# 26.04 toolsets, then checks libcrypt-dev is installed, crypt.h compiles and
+# links, and the software report query returns a version.
+# Delete this file before opening the PR.
 
 name: Validate libcrypt-dev (#14780)
 
@@ -16,38 +17,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
+        include:
+          - os: ubuntu-26.04
+            toolset: toolset-2604.json
+          - os: ubuntu-26.04-arm
+            toolset: toolset-2604-arm64.json
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v5
+
       - name: Image info
         run: |
           echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
-          lsb_release -ds; uname -m
+          dpkg-query -W -f='${Package} ${Version}\n' libcrypt-dev 2>&1 || true
 
-      - name: Package state
+      - name: Install common_packages from branch toolset (same loop as install-apt-common.sh)
         run: |
-          dpkg-query -W -f='${Package} ${Version} ${Status}\n' libc6-dev libcrypt-dev libcrypt1 2>&1 || true
-          echo "--- libc6-dev Depends:"
-          dpkg-query -W -f='${Depends}\n' libc6-dev
-          echo "--- reverse deps of libcrypt-dev installed:"
-          apt-cache rdepends --installed libcrypt-dev 2>&1 || true
-          echo "--- crypt.h / libcrypt.so:"
-          ls -l /usr/include/crypt.h /usr/lib/*-linux-gnu/libcrypt.so* 2>&1 || true
+          toolset=images/ubuntu/toolsets/${{ matrix.toolset }}
+          jq -e '.apt.common_packages | index("libcrypt-dev")' "$toolset"
+          sudo apt-get update -qq
+          for package in $(jq -r '.apt.common_packages[]' "$toolset"); do
+            echo "Install $package"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $package >/dev/null
+          done
 
-      - name: Compile crypt() test (before)
-        continue-on-error: true
+      - name: Verify
         run: |
-          cat > t.c <<'EOF'
+          echo "Software report version: $(dpkg-query -W -f '${Version}' libcrypt-dev)"
+          ls -l /usr/include/crypt.h
+          cat > t.c <<'SRC'
           #include <crypt.h>
           #include <stdio.h>
           int main(void) { puts(crypt("pw", "$6$salt$")); return 0; }
-          EOF
-          gcc t.c -o t -lcrypt && ./t
-
-      - name: Install libcrypt-dev and compile (after)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libcrypt-dev
-          dpkg-query -W -f='${Package} ${Version} ${Installed-Size}KB\n' libcrypt-dev
+          SRC
           gcc t.c -o t -lcrypt && ./t
