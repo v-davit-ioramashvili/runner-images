@@ -1,0 +1,58 @@
+# TEMPORARY - hosted-runners-images#947. Attribute /etc/apt/apt.conf.d/80-retries
+# (Retries 1, Timeout 600), which the public repo never writes. Claim under test: it is
+# written at VM first boot (primer / hosted-compute bootstrap), not during the image build.
+# If so, its mtime matches this VM's boot, while the build-time files (zz-retries,
+# 90assumeyes) carry the image build date.
+# Delete this file before opening any PR.
+
+name: Validate 80-retries origin (947)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/apt-80retries-origin*'
+
+jobs:
+  origin:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: When was 80-retries written, relative to this VM's boot and the image build
+        run: |
+          set +e -uo pipefail
+          echo "image     : ${ImageOS:-?} ${ImageVersion:-?}"
+          echo "boot time : $(uptime -s)"
+          echo "now       : $(date '+%Y-%m-%d %H:%M:%S')"
+          echo
+          echo "--- apt.conf.d files, oldest first (mtime) ---"
+          sudo find /etc/apt/apt.conf.d -maxdepth 1 -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS  %f\n' | sort | cut -c1-19,31-
+          echo
+          echo "--- 80-retries content ---"
+          cat /etc/apt/apt.conf.d/80-retries 2>/dev/null || echo "(absent)"
+          echo
+          booted=$(date -d "$(uptime -s)" +%s)
+          for f in 80-retries zz-retries 90assumeyes; do
+            p=/etc/apt/apt.conf.d/$f
+            [ -f "$p" ] || { echo "$f: absent"; continue; }
+            m=$(stat -c %Y "$p")
+            printf '%-12s written %8ss %s boot\n' "$f" "$(( m > booted ? m - booted : booted - m ))" "$([ "$m" -ge "$booted" ] && echo after || echo before)"
+          done
+
+      - name: Which first-boot services ran, and when
+        run: |
+          set +e -uo pipefail
+          echo "--- primer / provisioning units ---"
+          systemctl list-units --all --no-pager 2>/dev/null | grep -iE "primer|provision|hosted|walinux|cloud-(init|final|config)" || echo "none matched"
+          for u in $(systemctl list-units --all --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -iE "primer"); do
+            echo "--- $u ---"
+            systemctl show "$u" -p ActiveEnterTimestamp -p ExecMainStartTimestamp -p ExecMainExitTimestamp --no-pager
+          done
+          echo
+          echo "--- anything on disk or in logs that names 80-retries ---"
+          sudo grep -rIl "80-retries" /var/log /var/lib/cloud /etc/cloud /etc/systemd /opt 2>/dev/null | head -20 || true
+          sudo journalctl -b --no-pager 2>/dev/null | grep -i "80-retries\|apt.conf.d" | head -10 || true
