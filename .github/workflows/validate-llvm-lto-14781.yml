@@ -1,0 +1,91 @@
+# TEMPORARY - diagnostic for #14781 (clang 18 LTO vs LLVM 17 bfd plugin).
+name: Validate LLVM LTO 14781
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/llvm-lto-14781*'
+
+jobs:
+  lto:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Inventory
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          clang++ --version | head -1
+          ld --version | head -1
+          echo "--- /usr/lib/bfd-plugins"
+          ls -l /usr/lib/bfd-plugins/ || true
+          for f in /usr/lib/bfd-plugins/*; do
+            echo "$f -> $(readlink -f "$f")"; dpkg -S "$(readlink -f "$f")" 2>/dev/null || dpkg -S "$f" 2>/dev/null || echo "  (no owning package)"
+          done
+          echo "--- LLVMgold.so candidates"
+          ls -l /usr/lib/llvm-*/lib/LLVMgold.so 2>/dev/null || true
+          echo "--- installed llvm linker-tools packages"
+          dpkg -l | grep -E 'llvm-[0-9]+-linker-tools|^ii  llvm ' || true
+
+      - name: Sources
+        run: |
+          mkdir -p lto && cd lto
+          printf 'int add(int a,int b){return a+b;}\n' > lib.cpp
+          printf '#include <cstdio>\nint add(int,int);\nint main(){std::printf("%%d\\n",add(40,2));}\n' > main.cpp
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(lto CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          add_library(mylib STATIC lib.cpp)
+          add_executable(app main.cpp)
+          target_link_libraries(app mylib)
+          EOF
+
+      - name: A - direct link clang++ -flto (no static lib)
+        continue-on-error: true
+        working-directory: lto
+        run: clang++ -flto -O2 main.cpp lib.cpp -o a.out && ./a.out
+
+      - name: B - GNU ar on LTO object, then link
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          clang++ -flto -O2 -c lib.cpp -o lib.o
+          ar rcs libmylib.a lib.o
+          nm libmylib.a || true
+          clang++ -flto -O2 main.cpp -L. -lmylib -o b.out && ./b.out
+
+      - name: C - CMake with -flto in CMAKE_CXX_FLAGS (reporter's setup)
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          CXX=clang++ cmake -S . -B build-c -DCMAKE_CXX_FLAGS=-flto
+          grep -E '^CMAKE_(AR|RANLIB):' build-c/CMakeCache.txt
+          cmake --build build-c --verbose && ./build-c/app
+
+      - name: D - workaround - CMake with llvm-ar/llvm-ranlib
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          CXX=clang++ cmake -S . -B build-d -DCMAKE_CXX_FLAGS=-flto \
+            -DCMAKE_AR=$(command -v llvm-ar-18 || command -v llvm-ar) \
+            -DCMAKE_RANLIB=$(command -v llvm-ranlib-18 || command -v llvm-ranlib)
+          cmake --build build-d && ./build-d/app
+
+      - name: E - workaround - CMake IPO (CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          CXX=clang++ cmake -S . -B build-e -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+          grep -E '^CMAKE_CXX_COMPILER_(AR|RANLIB):' build-e/CMakeCache.txt || true
+          cmake --build build-e --verbose && ./build-e/app
+
+      - name: F - workaround - -fuse-ld=lld
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          CXX=clang++ cmake -S . -B build-f -DCMAKE_CXX_FLAGS=-flto -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
+          cmake --build build-f && ./build-f/app
