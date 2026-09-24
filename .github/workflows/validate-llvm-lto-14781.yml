@@ -54,6 +54,7 @@ jobs:
         working-directory: lto
         run: |
           clang++ -flto -O2 -c lib.cpp -o lib.o
+          llvm-dis-18 lib.o -o - | grep -c dead_on_unwind || echo "no dead_on_unwind in IR"
           ar rcs libmylib.a lib.o
           nm libmylib.a || true
           clang++ -flto -O2 main.cpp -L. -lmylib -o b.out && ./b.out
@@ -89,3 +90,12 @@ jobs:
         run: |
           CXX=clang++ cmake -S . -B build-f -DCMAKE_CXX_FLAGS=-flto -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
           cmake --build build-f && ./build-f/app
+
+      - name: G - image-side fix candidate - drop non-default LLVMgold symlinks, rerun C
+        continue-on-error: true
+        working-directory: lto
+        run: |
+          sudo rm -f /usr/lib/bfd-plugins/LLVMgold-16.so /usr/lib/bfd-plugins/LLVMgold-17.so
+          ls -l /usr/lib/bfd-plugins/
+          CXX=clang++ cmake -S . -B build-g -DCMAKE_CXX_FLAGS=-flto
+          cmake --build build-g --verbose && ./build-g/app
