@@ -1,0 +1,38 @@
+# TEMPORARY - validation aid for #14783 (BPF LSM on Ubuntu runners).
+# Confirms active LSMs, kernel config, current cmdline and where the image's
+# GRUB cmdline comes from. Delete this file before opening any PR.
+
+name: Validate BPF LSM 14783
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/bpf-lsm-14783*'
+
+jobs:
+  lsm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Kernel + active LSMs
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          uname -a
+          echo "--- /sys/kernel/security/lsm"; cat /sys/kernel/security/lsm; echo
+          echo "--- /proc/cmdline"; cat /proc/cmdline
+          echo "--- kernel config"
+          grep -E '^CONFIG_(BPF_LSM|LSM|BPF_SYSCALL|DEBUG_INFO_BTF)=' "/boot/config-$(uname -r)" || true
+          echo "--- BTF present: $(test -f /sys/kernel/btf/vmlinux && echo yes || echo no)"
+
+      - name: Boot config sources
+        run: |
+          echo "--- EFI: $(test -d /sys/firmware/efi && echo yes || echo no)"
+          echo "--- /etc/default/grub"; grep -v '^#' /etc/default/grub | sed '/^$/d' || true
+          for f in /etc/default/grub.d/*.cfg; do echo "--- $f"; grep -v '^#' "$f" | sed '/^$/d'; done
+          echo "--- linux lines in grub.cfg"
+          sudo grep -E '^\s*linux\s' /boot/grub/grub.cfg | head -5 || true
