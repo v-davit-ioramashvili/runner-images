@@ -1,0 +1,329 @@
+# TEMPORARY - evidence gathering for hosted-runners-images#947 (apt mirror strategy).
+# The ticket asks for endpoint independence to be VERIFIED rather than inferred from
+# hostnames, and for failover behaviour to be defined separately for an unavailable
+# mirror and a slow-but-progressing one. Neither can be answered from a workstation:
+# azure.archive.ubuntu.com is Traffic-Manager routed, so the answer depends on which
+# Azure region the runner sits in, and apt's timing depends on the shipped apt.conf.
+# What this workflow collects, on real hosted runners:
+#   A. Per-region resolution + ASN ownership of every endpoint in /etc/apt/apt-mirrors.txt
+#      (plus ports.ubuntu.com, which 22.04/24.04 arm64 use), and the overlap between them.
+#      This is the failure-domain map the design has to be built on.
+#   B. Time-to-failover when priority:1 is a black hole, under the shipped acquire
+#      settings vs apt's defaults - i.e. what #14643 actually bought us.
+#   C. Whether time-to-failover scales with the number of index items, which is the
+#      premise #14719 rests on.
+#   D. Whether a slow-but-progressing mirror is bounded at all. Acquire::*::Timeout is
+#      an inactivity timeout, so the expectation is that it is NOT, and this measures it.
+# Nothing here touches the runner's own /etc/apt - every measurement runs against a
+# scratch apt tree under $RUNNER_TEMP.
+# Delete this file before opening any PR.
+
+name: Validate apt mirror strategy (947)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/apt-mirror-strategy*'
+
+jobs:
+  endpoint-independence:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+          - ubuntu-22.04-arm
+          - ubuntu-24.04-arm
+          - ubuntu-26.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Context - image, arch, region, and the mirror list as shipped
+        run: |
+          set -uo pipefail
+          echo "runner label : ${{ matrix.runner }}"
+          echo "uname -m     : $(uname -m)"
+          lsb_release -ds || true
+          echo "--- Azure region this runner is in (from IMDS) ---"
+          curl -s -H Metadata:true --max-time 5 \
+            "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01" \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("location","unknown"), d.get("zone",""))' \
+            2>/dev/null || echo "IMDS unavailable"
+          echo "--- /etc/apt/apt-mirrors.txt ---"
+          cat /etc/apt/apt-mirrors.txt 2>/dev/null || echo "(absent - this image does not use the mirror list)"
+          echo "--- apt sources ---"
+          grep -rh "^URIs:\|^deb " /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | sort -u
+
+      - name: Ensure dig is present (before any mirror tampering)
+        run: |
+          set -uo pipefail
+          command -v dig >/dev/null || sudo apt-get install -y -qq bind9-dnsutils >/dev/null 2>&1 \
+            || sudo apt-get install -y -qq dnsutils >/dev/null 2>&1
+          command -v dig >/dev/null && echo "dig present" || echo "dig unavailable, falling back to getent"
+
+      - name: 'Claim A - resolve every endpoint and attribute each address to an owner'
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/endpoints"
+          mkdir -p "$OUT"
+
+          resolve() {
+            if command -v dig >/dev/null; then
+              dig +short A "$1" | grep -E '^[0-9]+\.' | sort -V
+            else
+              getent ahostsv4 "$1" | awk '{print $1}' | sort -uV
+            fi
+          }
+
+          asn_of() {
+            local ip rev
+            ip="$1"
+            rev=$(echo "$ip" | awk -F. '{print $4"."$3"."$2"."$1}')
+            dig +short TXT "${rev}.origin.asn.cymru.com" 2>/dev/null \
+              | tr -d '"' | head -1 | awk -F'|' '{gsub(/ /,"",$1); print "AS"$1" "$2}'
+          }
+
+          for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com; do
+            echo "=================================================================="
+            echo "$h"
+            echo "=================================================================="
+            if command -v dig >/dev/null; then
+              echo "--- CNAME chain ---"
+              dig +short "$h" | sed '/^[0-9]\{1,3\}\./d' | sed 's/^/  -> /' || true
+            fi
+            resolve "$h" > "$OUT/$h.ips"
+            echo "--- addresses and owners ---"
+            while read -r ip; do
+              printf '  %-16s %s\n' "$ip" "$(asn_of "$ip")"
+            done < "$OUT/$h.ips"
+            echo "  ($(wc -l < "$OUT/$h.ips") addresses)"
+          done
+
+          echo
+          echo "=================================================================="
+          echo "OVERLAP - the question the ticket actually asks"
+          echo "=================================================================="
+          pair() {
+            local a b shared
+            a="$1"
+            b="$2"
+            shared=$(comm -12 <(sort "$OUT/$a.ips") <(sort "$OUT/$b.ips") | wc -l)
+            printf '  %-28s vs %-28s shared addresses: %s\n' "$a" "$b" "$shared"
+            if [ "$shared" -gt 0 ]; then
+              echo "    NOT INDEPENDENT - same servers behind different names"
+            fi
+          }
+          pair azure.archive.ubuntu.com archive.ubuntu.com
+          pair azure.archive.ubuntu.com security.ubuntu.com
+          pair archive.ubuntu.com       security.ubuntu.com
+          pair archive.ubuntu.com       ports.ubuntu.com
+
+          echo
+          echo "--- distinct owning ASNs across the whole mirror list ---"
+          cat "$OUT/azure.archive.ubuntu.com.ips" "$OUT/archive.ubuntu.com.ips" "$OUT/security.ubuntu.com.ips" \
+            | while read -r ip; do asn_of "$ip"; done | sort -u | sed 's/^/  /'
+          echo "  (a mirror list with three entries but fewer than three ASNs has fewer failure domains than it appears to)"
+
+      - name: 'Claim A2 - do the endpoints diverge on the network path, or only at the last hop'
+        run: |
+          set -uo pipefail
+          command -v tracepath >/dev/null || sudo apt-get install -y -qq iputils-tracepath >/dev/null 2>&1 || true
+          for h in azure.archive.ubuntu.com archive.ubuntu.com; do
+            echo "=== path to $h ==="
+            timeout 60 tracepath -m 12 -n "$h" 2>&1 | head -15 || echo "(tracepath unavailable or filtered)"
+          done
+
+  failover-behaviour:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Build a scratch apt tree so the runner's own apt is never touched
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/aptlab"
+          mkdir -p "$W/lists/partial" "$W/cache/archives/partial"
+          echo "APTLAB=$W" >> "$GITHUB_ENV"
+          echo "SUITE=$(lsb_release -cs)" >> "$GITHUB_ENV"
+          echo "scratch tree: $W"
+          echo "--- effective acquire settings this image ships ---"
+          apt-config dump Acquire::Retries Acquire::http::Timeout Acquire::https::Timeout
+
+      - name: 'Claim B - time-to-failover when priority:1 is a black hole'
+        run: |
+          set -uo pipefail
+          W="$APTLAB"
+
+          # 192.0.2.0/24 is TEST-NET-1 and must never be routed. DROP (not REJECT) so the
+          # connection HANGS rather than being refused - a refusal fails fast and is not the
+          # behaviour #14594 reported.
+          sudo iptables -I OUTPUT -d 192.0.2.1 -j DROP
+          trap 'sudo iptables -D OUTPUT -d 192.0.2.1 -j DROP 2>/dev/null || true' EXIT
+
+          printf 'http://192.0.2.1/ubuntu/\tpriority:1\n'           >  "$W/mirrors-dead.txt"
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:2\n' >> "$W/mirrors-dead.txt"
+          echo "deb mirror+file:$W/mirrors-dead.txt $SUITE main" > "$W/sources-dead.list"
+
+          run_case() {
+            local label retries timeout_s start end rc
+            label="$1"
+            retries="$2"
+            timeout_s="$3"
+            start=$(date +%s)
+            sudo timeout 1800 apt-get update -qq \
+              -o Dir::Etc::sourcelist="$W/sources-dead.list" \
+              -o Dir::Etc::sourceparts=/dev/null \
+              -o Dir::Etc::parts=/dev/null \
+              -o Dir::State::Lists="$W/lists" \
+              -o Dir::Cache="$W/cache" \
+              -o Acquire::Retries="$retries" \
+              -o Acquire::http::Timeout="$timeout_s" \
+              -o Acquire::https::Timeout="$timeout_s" \
+              >/dev/null 2>&1
+            rc=$?
+            end=$(date +%s)
+            printf '  %-46s %4ss (exit %s)\n' "$label" "$((end-start))" "$rc"
+            sudo rm -rf "$W/lists" && sudo mkdir -p "$W/lists/partial"
+          }
+
+          echo "one suite, one component, priority:1 black-holed, priority:2 healthy:"
+          run_case "shipped today  (Retries=1,  Timeout=15)"  1  15
+          run_case "apt defaults   (Retries=3,  Timeout=30)"  3  30
+          run_case "pre-#14643 key (Retries=10, Timeout=30)" 10  30
+
+      - name: 'Claim C - does time-to-failover scale with the number of index items'
+        run: |
+          set -uo pipefail
+          W="$APTLAB"
+          sudo iptables -I OUTPUT -d 192.0.2.1 -j DROP
+          trap 'sudo iptables -D OUTPUT -d 192.0.2.1 -j DROP 2>/dev/null || true' EXIT
+
+          # Same black hole, but vary how many index targets apt asks for. If failover cost
+          # scales with item count, the mirror method is restarting from priority:1 per item
+          # and keeping no failure state - which is the premise #14719 rests on.
+          printf 'http://192.0.2.1/ubuntu/\tpriority:1\n'           >  "$W/mirrors-dead.txt"
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:2\n' >> "$W/mirrors-dead.txt"
+
+          measure() {
+            local label start end
+            label="$1"
+            shift
+            start=$(date +%s)
+            sudo timeout 1800 apt-get update -qq \
+              -o Dir::Etc::sourcelist="$W/sources-dead.list" \
+              -o Dir::Etc::sourceparts=/dev/null \
+              -o Dir::Etc::parts=/dev/null \
+              -o Dir::State::Lists="$W/lists" \
+              -o Dir::Cache="$W/cache" \
+              -o Acquire::Retries=1 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              "$@" >/dev/null 2>&1
+            end=$(date +%s)
+            printf '  %-52s %4ss\n' "$label" "$((end-start))"
+            sudo rm -rf "$W/lists" && sudo mkdir -p "$W/lists/partial"
+          }
+
+          echo "deb mirror+file:$W/mirrors-dead.txt $SUITE main" > "$W/sources-dead.list"
+          measure "1 component  (main)"
+
+          echo "deb mirror+file:$W/mirrors-dead.txt $SUITE main universe restricted multiverse" > "$W/sources-dead.list"
+          measure "4 components (main universe restricted multiverse)"
+          measure "4 components, DEP-11 disabled (the #14719 change)" \
+            -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false
+          measure "4 components, DEP-11 + Translations disabled" \
+            -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false \
+            -o Acquire::IndexTargets::deb::Translations::DefaultEnabled=false
+
+      - name: 'Claim D - is a slow-but-progressing mirror bounded by anything'
+        run: |
+          set -uo pipefail
+          W="$APTLAB"
+
+          # A mirror that never stops sending, but sends almost nothing. Acquire::*::Timeout is
+          # an INACTIVITY timeout, so a trickle resets it forever. If apt is bounded here at all,
+          # this step ends well before the 300s cap; if it runs the full 300s, nothing bounds it.
+          cat > "$W/trickle.py" <<'PY'
+          import http.server, socketserver, time
+
+          class Trickle(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/octet-stream")
+                  self.send_header("Content-Length", "100000000")
+                  self.end_headers()
+                  try:
+                      while True:
+                          self.wfile.write(b"x")
+                          self.wfile.flush()
+                          time.sleep(10)   # one byte per 10s, well inside a 15s inactivity timeout
+                  except Exception:
+                      pass
+
+              def log_message(self, *a):
+                  pass
+
+          # Threaded on purpose: a single-threaded server would queue apt's second connection
+          # and we could not tell a real apt stall from our own test harness blocking.
+          class Server(socketserver.ThreadingTCPServer):
+              allow_reuse_address = True
+              daemon_threads = True
+
+          with Server(("127.0.0.1", 8899), Trickle) as s:
+              s.serve_forever()
+          PY
+
+          python3 "$W/trickle.py" &
+          TRICKLE_PID=$!
+          trap 'kill $TRICKLE_PID 2>/dev/null || true' EXIT
+          sleep 2
+
+          echo "deb http://127.0.0.1:8899/ubuntu $SUITE main" > "$W/sources-slow.list"
+          start=$(date +%s)
+          sudo timeout 300 apt-get update -qq \
+            -o Dir::Etc::sourcelist="$W/sources-slow.list" \
+            -o Dir::Etc::sourceparts=/dev/null \
+            -o Dir::Etc::parts=/dev/null \
+            -o Dir::State::Lists="$W/lists" \
+            -o Dir::Cache="$W/cache" \
+            -o Acquire::Retries=1 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            >/dev/null 2>&1
+          rc=$?
+          end=$(date +%s)
+          elapsed=$((end-start))
+          echo "  trickling mirror, Timeout=15, outer cap 300s -> apt ran ${elapsed}s (exit $rc)"
+          if [ "$elapsed" -ge 290 ]; then
+            echo "  RESULT: UNBOUNDED. Acquire::*::Timeout did not fire against a progressing mirror."
+            echo "          A slow mirror cannot be bounded by apt's timeouts - only by fetching"
+            echo "          fewer bytes, or by a watchdog outside apt."
+          else
+            echo "  RESULT: apt gave up after ${elapsed}s - something does bound this case."
+          fi
+
+      - name: Confirm the runner's own apt was never modified
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "--- /etc/apt/apt-mirrors.txt (must be unchanged) ---"
+          cat /etc/apt/apt-mirrors.txt 2>/dev/null || echo "(absent)"
+          echo "--- effective acquire settings (must match the image) ---"
+          apt-config dump Acquire::Retries Acquire::http::Timeout Acquire::https::Timeout
+          echo "--- leftover iptables OUTPUT rules (must be none) ---"
+          sudo iptables -S OUTPUT | grep -F "192.0.2.1" || echo "none"
