@@ -33,8 +33,9 @@ jobs:
       - name: Sources
         run: |
           mkdir -p lto && cd lto
-          printf 'int add(int a,int b){return a+b;}\n' > lib.cpp
-          printf '#include <cstdio>\nint add(int,int);\nint main(){std::printf("%%d\\n",add(40,2));}\n' > main.cpp
+          # returning std::string -> sret param -> clang 18 emits dead_on_unwind (attr kind 91)
+          printf '#include <string>\nstd::string greet(int n){return std::string("v")+std::to_string(n);}\n' > lib.cpp
+          printf '#include <cstdio>\n#include <string>\nstd::string greet(int);\nint main(){std::puts(greet(42).c_str());}\n' > main.cpp
           cat > CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.20)
           project(lto CXX)
