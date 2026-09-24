@@ -1,0 +1,53 @@
+# TEMPORARY - validation aid for #14780.
+# Checks whether libcrypt-dev (crypt.h + libcrypt.so) is present on each Ubuntu
+# image, why (libc6-dev dependency), and whether a crypt() program compiles and
+# links before/after installing it. Delete this file before opening the PR.
+
+name: Validate libcrypt-dev (#14780)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/libcrypt-dev-14780*'
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Image info
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          lsb_release -ds; uname -m
+
+      - name: Package state
+        run: |
+          dpkg-query -W -f='${Package} ${Version} ${Status}\n' libc6-dev libcrypt-dev libcrypt1 2>&1 || true
+          echo "--- libc6-dev Depends:"
+          dpkg-query -W -f='${Depends}\n' libc6-dev
+          echo "--- reverse deps of libcrypt-dev installed:"
+          apt-cache rdepends --installed libcrypt-dev 2>&1 || true
+          echo "--- crypt.h / libcrypt.so:"
+          ls -l /usr/include/crypt.h /usr/lib/*-linux-gnu/libcrypt.so* 2>&1 || true
+
+      - name: Compile crypt() test (before)
+        continue-on-error: true
+        run: |
+          cat > t.c <<'EOF'
+          #include <crypt.h>
+          #include <stdio.h>
+          int main(void) { puts(crypt("pw", "$6$salt$")); return 0; }
+          EOF
+          gcc t.c -o t -lcrypt && ./t
+
+      - name: Install libcrypt-dev and compile (after)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libcrypt-dev
+          dpkg-query -W -f='${Package} ${Version} ${Installed-Size}KB\n' libcrypt-dev
+          gcc t.c -o t -lcrypt && ./t
