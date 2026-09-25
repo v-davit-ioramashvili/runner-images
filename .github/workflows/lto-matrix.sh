@@ -76,15 +76,19 @@ run_case "default clang++ CMake -flto (unversioned)" "CXX=clang++ cmake -S . -B 
 run_case "default clang++ CMake IPO (unversioned)"   "CXX=clang++ cmake -S . -B build -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON >/dev/null; cmake --build build; cp build/app app"
 run_case "default cc/c++ (gcc) CMake -flto"          "CXX=c++ cmake -S . -B build -DCMAKE_CXX_FLAGS=-flto >/dev/null; cmake --build build; cp build/app app"
 # Rust crate with a C dependency built by the cc crate (uses system ar) - common real-world path
+cargo_case() { # <cc to use>
+  rm -rf rs && cargo new -q --vcs none rs && cd rs || return 1
+  printf '[build-dependencies]\ncc = "1"\n' >> Cargo.toml
+  cp ../lib.c src/
+  printf 'fn main(){cc::Build::new().file("src/lib.c").compile("big");}\n' > build.rs
+  printf '#[repr(C)] struct Big{a:[i64;8]}\nunsafe extern "C" { fn make(n:i64)->Big; }\nfn main(){println!("v{}",unsafe{make(42)}.a[7]);}\n' > src/main.rs
+  CC=$1 cargo build -q && cp target/debug/rs ../app
+}
+export -f cargo_case
 if command -v cargo >/dev/null; then
-  run_case "cargo + cc crate (C dep via ar)" "cargo new -q --vcs none rs && cd rs && printf '[build-dependencies]
-cc = \"1\"
-' >> Cargo.toml && cp ../lib.c src/ && printf 'fn main(){cc::Build::new().file(\"src/lib.c\").compile(\"big\");}
-' > build.rs && printf '#[repr(C)] struct Big{a:[i64;8]}
-extern \"C\"{fn make(n:i64)->Big;}
-fn main(){println!(\"v{}\",unsafe{make(42)}.a[7]);}
-' > src/main.rs && cargo build -q && cp target/debug/rs ../app"
-else skip "cargo + cc crate (C dep via ar)"; fi
+  run_case "cargo + cc crate, CC=gcc (C dep via ar)"   "cargo_case gcc"
+  run_case "cargo + cc crate, CC=clang (C dep via ar)" "cargo_case clang"
+else skip "cargo + cc crate, CC=gcc (C dep via ar)"; skip "cargo + cc crate, CC=clang (C dep via ar)"; fi
 
 for v in $(ls /usr/bin/g++-[0-9]* 2>/dev/null | sed -E 's#.*g\+\+-##' | sort -n); do
   cxx=g++-$v
