@@ -71,6 +71,21 @@ for v in $(ls -d /usr/lib/llvm-*/bin/clang 2>/dev/null | sed -E 's#.*/llvm-([0-9
   run_case "clang$v CMake IPO"                 "CXX=$cxx cmake -S . -B build -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON >/dev/null; cmake --build build; cp build/app app"
 done
 
+# reporter's setup: unversioned clang++ -> CMake picks /usr/bin/ar (versioned name picks llvm-ar-N)
+run_case "default clang++ CMake -flto (unversioned)" "CXX=clang++ cmake -S . -B build -DCMAKE_CXX_FLAGS=-flto >/dev/null; grep -E '^CMAKE_AR:' build/CMakeCache.txt; cmake --build build; cp build/app app"
+run_case "default clang++ CMake IPO (unversioned)"   "CXX=clang++ cmake -S . -B build -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON >/dev/null; cmake --build build; cp build/app app"
+run_case "default cc/c++ (gcc) CMake -flto"          "CXX=c++ cmake -S . -B build -DCMAKE_CXX_FLAGS=-flto >/dev/null; cmake --build build; cp build/app app"
+# Rust crate with a C dependency built by the cc crate (uses system ar) - common real-world path
+if command -v cargo >/dev/null; then
+  run_case "cargo + cc crate (C dep via ar)" "cargo new -q --vcs none rs && cd rs && printf '[build-dependencies]
+cc = \"1\"
+' >> Cargo.toml && cp ../lib.c src/ && printf 'fn main(){cc::Build::new().file(\"src/lib.c\").compile(\"big\");}
+' > build.rs && printf '#[repr(C)] struct Big{a:[i64;8]}
+extern \"C\"{fn make(n:i64)->Big;}
+fn main(){println!(\"v{}\",unsafe{make(42)}.a[7]);}
+' > src/main.rs && cargo build -q && cp target/debug/rs ../app"
+else skip "cargo + cc crate (C dep via ar)"; fi
+
 for v in $(ls /usr/bin/g++-[0-9]* 2>/dev/null | sed -E 's#.*g\+\+-##' | sort -n); do
   cxx=g++-$v
   run_case "gcc$v -flto | GNU ar"     "$cxx -flto -O2 -c lib.cpp; ar rcs libx.a lib.o; $cxx -flto -O2 main.cpp libx.a -o app"
