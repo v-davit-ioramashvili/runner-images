@@ -42,7 +42,7 @@ jobs:
               permissions: '0755'
               content: |
                 #!/bin/bash
-                exec > /dev/ttyS0 2>&1
+                exec > /dev/ttyS1 2>&1
                 if [ ! -f /var/lib/14777-boot1 ]; then
                   touch /var/lib/14777-boot1
                   echo "=== BOOT1 /tmp: \$(findmnt -no FSTYPE,SIZE /tmp)"
@@ -77,19 +77,20 @@ jobs:
           timeout 20m qemu-system-x86_64 -enable-kvm -cpu host -m 4096 -smp 2 \
             -drive file=disk.qcow2,if=virtio -drive file=seed.img,if=virtio,format=raw \
             -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-            -display none -serial file:serial.log || echo "qemu exit $?"
-          grep -a "=== BOOT1" serial.log || true
-          sed -n '/=== REPORT BEGIN/,/=== REPORT END/p' serial.log | tr -d '\r'
-          grep -aq "=== REPORT END" serial.log
+            -display none -serial file:serial.log -serial file:report.log || echo "qemu exit $?"
+          grep -a "=== BOOT1" report.log || true
+          sed -n '/=== REPORT BEGIN/,/=== REPORT END/p' report.log | tr -d '\r'
+          grep -aq "=== REPORT END" report.log
 
       - name: Upload serial log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: serial-${{ matrix.variant }}
-          path: serial.log
+          path: "*.log"
 
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[boot-only]') }}
     name: otelcol-contrib build (${{ matrix.os }}, ${{ matrix.tmp }})
     strategy:
       fail-fast: false
@@ -132,6 +133,7 @@ jobs:
           exit $rc
 
   sideeffects:
+    if: ${{ !contains(github.event.head_commit.message, '[boot-only]') }}
     name: side effects (${{ matrix.os }})
     strategy:
       fail-fast: false
