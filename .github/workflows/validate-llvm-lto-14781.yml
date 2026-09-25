@@ -1,4 +1,9 @@
-# TEMPORARY - diagnostic for #14781 (clang 18 LTO vs LLVM 17 bfd plugin).
+# TEMPORARY - regression matrix for #14781 (LLVMgold bfd-plugins cleanup).
+# For every Ubuntu image, runs the same LTO/archive/linker scenarios three times:
+#   baseline      - image as shipped
+#   keep-default  - only the default clang's LLVMgold registered in /usr/lib/bfd-plugins
+#   keep-newest   - only the newest clang's LLVMgold registered
+# A regression = PASS on baseline but FAIL (or new plugin warning) on a variant.
 name: Validate LLVM LTO 14781
 
 on:
@@ -8,95 +13,89 @@ on:
       - 'validate/llvm-lto-14781*'
 
 jobs:
-  lto:
+  matrix:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
-    runs-on: ${{ matrix.os }}
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      RESULTS: ${{ github.workspace }}/results-${{ matrix.runner }}.csv
     steps:
+      - uses: actions/checkout@v5
+
       - name: Inventory
         run: |
-          echo "ImageVersion=$ImageVersion"
-          clang++ --version | head -1
-          ld --version | head -1
-          echo "--- /usr/lib/bfd-plugins"
-          ls -l /usr/lib/bfd-plugins/ || true
-          for f in /usr/lib/bfd-plugins/*; do
-            echo "$f -> $(readlink -f "$f")"; dpkg -S "$(readlink -f "$f")" 2>/dev/null || dpkg -S "$f" 2>/dev/null || echo "  (no owning package)"
-          done
-          echo "--- LLVMgold.so candidates"
-          ls -l /usr/lib/llvm-*/lib/LLVMgold.so 2>/dev/null || true
-          echo "--- installed llvm linker-tools packages"
-          dpkg -l | grep -E 'llvm-[0-9]+-linker-tools|^ii  llvm ' || true
-
-      - name: Sources
-        run: |
-          mkdir -p lto && cd lto
-          # returning std::string -> sret param -> clang 18 emits dead_on_unwind (attr kind 91)
-          printf '#include <string>\nstd::string greet(int n){return std::string("v")+std::to_string(n);}\n' > lib.cpp
-          printf '#include <cstdio>\n#include <string>\nstd::string greet(int);\nint main(){std::puts(greet(42).c_str());}\n' > main.cpp
-          cat > CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.20)
-          project(lto CXX)
-          set(CMAKE_CXX_STANDARD 20)
-          add_library(mylib STATIC lib.cpp)
-          add_executable(app main.cpp)
-          target_link_libraries(app mylib)
-          EOF
-
-      - name: A - direct link clang++ -flto (no static lib)
-        continue-on-error: true
-        working-directory: lto
-        run: clang++ -flto -O2 main.cpp lib.cpp -o a.out && ./a.out
-
-      - name: B - GNU ar on LTO object, then link
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          clang++ -flto -O2 -c lib.cpp -o lib.o
-          llvm-dis-18 lib.o -o - | grep -c dead_on_unwind || echo "no dead_on_unwind in IR"
-          ar rcs libmylib.a lib.o
-          nm libmylib.a || true
-          clang++ -flto -O2 main.cpp -L. -lmylib -o b.out && ./b.out
-
-      - name: C - CMake with -flto in CMAKE_CXX_FLAGS (reporter's setup)
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          CXX=clang++ cmake -S . -B build-c -DCMAKE_CXX_FLAGS=-flto
-          grep -E '^CMAKE_(AR|RANLIB):' build-c/CMakeCache.txt
-          cmake --build build-c --verbose && ./build-c/app
-
-      - name: D - workaround - CMake with llvm-ar/llvm-ranlib
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          CXX=clang++ cmake -S . -B build-d -DCMAKE_CXX_FLAGS=-flto \
-            -DCMAKE_AR=$(command -v llvm-ar-18 || command -v llvm-ar) \
-            -DCMAKE_RANLIB=$(command -v llvm-ranlib-18 || command -v llvm-ranlib)
-          cmake --build build-d && ./build-d/app
-
-      - name: E - workaround - CMake IPO (CMAKE_INTERPROCEDURAL_OPTIMIZATION)
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          CXX=clang++ cmake -S . -B build-e -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
-          grep -E '^CMAKE_CXX_COMPILER_(AR|RANLIB):' build-e/CMakeCache.txt || true
-          cmake --build build-e --verbose && ./build-e/app
-
-      - name: F - workaround - -fuse-ld=lld
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          CXX=clang++ cmake -S . -B build-f -DCMAKE_CXX_FLAGS=-flto -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
-          cmake --build build-f && ./build-f/app
-
-      - name: G - image-side fix candidate - drop non-default LLVMgold symlinks, rerun C
-        continue-on-error: true
-        working-directory: lto
-        run: |
-          sudo rm -f /usr/lib/bfd-plugins/LLVMgold-16.so /usr/lib/bfd-plugins/LLVMgold-17.so
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"
           ls -l /usr/lib/bfd-plugins/
-          CXX=clang++ cmake -S . -B build-g -DCMAKE_CXX_FLAGS=-flto
-          cmake --build build-g --verbose && ./build-g/app
+          readlink -f /usr/bin/clang /usr/bin/ld
+          ls /usr/bin/g++-[0-9]* /usr/lib/llvm-*/bin/clang
+          # save the shipped symlinks so each variant starts from the real image state
+          for f in /usr/lib/bfd-plugins/LLVMgold-*.so; do echo "$f $(readlink "$f")"; done > "$RUNNER_TEMP/plugins.txt"
+          toolset=images/ubuntu/toolsets/toolset-$(. /etc/os-release; echo ${VERSION_ID/./})$([[ $(uname -m) == aarch64 ]] && echo -arm64).json
+          echo "TOOLSET=$toolset" >> "$GITHUB_ENV"
+          jq -c .clang "$toolset"
+
+      - name: baseline
+        run: bash .github/workflows/lto-matrix.sh baseline
+
+      - name: keep-default (proposed install-clang.sh change)
+        run: |
+          default=$(jq -r .clang.default_version "$TOOLSET")
+          # --- proposed install-clang.sh snippet ---
+          for version in $(jq -r '.clang.versions[]' "$TOOLSET"); do
+            if [[ $version != $default ]]; then
+              sudo rm -f "/usr/lib/bfd-plugins/LLVMgold-${version}.so"
+            fi
+          done
+          # ------------------------------------------
+          ls -l /usr/lib/bfd-plugins/
+          bash .github/workflows/lto-matrix.sh keep-default
+
+      - name: keep-newest
+        run: |
+          while read -r f t; do sudo ln -sfn "$t" "$f"; done < "$RUNNER_TEMP/plugins.txt"
+          newest=$(jq -r '.clang.versions[]' "$TOOLSET" | sort -n | tail -1)
+          for version in $(jq -r '.clang.versions[]' "$TOOLSET"); do
+            if [[ $version != $newest ]]; then sudo rm -f "/usr/lib/bfd-plugins/LLVMgold-${version}.so"; fi
+          done
+          ls -l /usr/lib/bfd-plugins/
+          bash .github/workflows/lto-matrix.sh keep-newest
+
+      - name: side effects - dpkg and apt with symlinks removed (informational)
+        continue-on-error: true
+        run: |
+          set +e
+          default=$(jq -r .clang.default_version "$TOOLSET")
+          other=$(jq -r '.clang.versions[]' "$TOOLSET" | grep -vx "$default" | head -1)
+          sudo rm -f /usr/lib/bfd-plugins/LLVMgold-$other.so
+          echo "--- dpkg --verify llvm-$other-linker-tools"
+          dpkg --verify "llvm-$other-linker-tools"; echo "exit=$?"
+          echo "--- apt-get check"
+          sudo apt-get check; echo "exit=$?"
+          echo "--- apt reinstall restores the symlink?"
+          sudo apt-get update -qq && sudo apt-get install --reinstall -y -qq "llvm-$other-linker-tools" >/dev/null 2>&1; echo "exit=$?"
+          ls -l /usr/lib/bfd-plugins/
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import csv, os, collections
+          rows = list(csv.reader(open(os.environ["RESULTS"])))
+          res = collections.OrderedDict()
+          for var, img, case, r, w in rows:
+              res.setdefault(case, {})[var] = r + ("*" if w == "1" else "")
+          vs = ["baseline", "keep-default", "keep-newest"]
+          print(f"### {rows[0][1]}\n\n| case | " + " | ".join(vs) + " |\n|---|" + "---|" * len(vs))
+          for case, d in res.items():
+              print(f"| {case} | " + " | ".join(d.get(v, "-") for v in vs) + " |")
+          print("\n`*` = binutils printed an LLVM plugin error")
+          EOF
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.runner }}
+          path: ${{ env.RESULTS }}
