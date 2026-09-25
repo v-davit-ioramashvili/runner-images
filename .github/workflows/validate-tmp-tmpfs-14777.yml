@@ -1,6 +1,8 @@
 # TEMPORARY - validation aid for #14777.
-# Confirms /tmp is a tmpfs (tmp.mount) on ubuntu-26.04 but on the root disk on 24.04,
-# shows the size/quota limits, and checks that masking tmp.mount + unmounting restores 24.04 behavior.
+# 1. boot:     boots a real Ubuntu 26.04 cloud image in KVM, masks tmp.mount and reboots (same order as the
+#              Packer build: configure-environment.sh -> reboot -> cleanup.sh), then checks /tmp and boot health.
+# 2. build:    the reporter's real workload (otelcol-contrib build) on 24.04, 26.04 stock and 26.04 with /tmp on disk.
+# 3. sideeffects: RAM cost of a full tmpfs /tmp and tmpfs vs disk speed on the hosted 26.04 runners.
 
 name: Validate /tmp tmpfs (#14777)
 
@@ -11,58 +13,158 @@ on:
       - 'validate/tmp-tmpfs-14777*'
 
 jobs:
-  tmp:
+  boot:
+    name: boot 26.04 VM (${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+        variant: [stock, masked]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - name: Inspect /tmp
+      - name: Install QEMU and enable KVM
         run: |
-          set -x
-          cat /etc/os-release | grep PRETTY
-          systemctl --version | head -1
-          free -h
-          df -hT / /tmp /var/tmp /mnt || true
-          findmnt -no SOURCE,FSTYPE,SIZE,OPTIONS /tmp || echo "/tmp is not a separate mount"
-          systemctl status tmp.mount --no-pager || true
-          systemctl is-enabled tmp.mount || true
-          systemctl cat tmp.mount --no-pager || true
-          ls -la /etc/systemd/system/tmp.mount /usr/lib/systemd/system/tmp.mount || true
-          grep -E '\s/tmp\s' /etc/fstab || echo "no /tmp in fstab"
-          echo "RUNNER_TEMP=$RUNNER_TEMP TMPDIR=${TMPDIR:-unset}"
-          sudo du -sh /tmp 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils >/dev/null
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
 
-      - name: Write 9G to /tmp as runner
-        continue-on-error: true
+      - name: Prepare image and cloud-init seed
         run: |
-          dd if=/dev/zero of=/tmp/big bs=1M count=9000 status=none && echo "OK: 9G written" ; rc=$?
-          ls -lh /tmp/big || true
-          rm -f /tmp/big
-          exit $rc
+          curl -fsSL -o base.img https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img
+          qemu-img create -f qcow2 -F qcow2 -b base.img disk.qcow2 20G
+          VARIANT=${{ matrix.variant }}
+          cat > user-data <<EOF
+          #cloud-config
+          write_files:
+            - path: /var/lib/cloud/scripts/per-boot/zz-14777.sh
+              permissions: '0755'
+              content: |
+                #!/bin/bash
+                exec > /dev/ttyS0 2>&1
+                if [ ! -f /var/lib/14777-boot1 ]; then
+                  touch /var/lib/14777-boot1
+                  echo "=== BOOT1 /tmp: \$(findmnt -no FSTYPE,SIZE /tmp)"
+                  mkdir -p /tmp/leftover && echo x > /tmp/leftover/file
+                  if [ "$VARIANT" = "masked" ]; then systemctl mask tmp.mount; fi
+                  sync; systemctl reboot
+                  exit 0
+                fi
+                echo "=== REPORT BEGIN ($VARIANT)"
+                cat /etc/os-release | grep PRETTY; uname -r; systemctl --version | head -1
+                echo "--- findmnt /tmp"; findmnt -no SOURCE,FSTYPE,SIZE,OPTIONS /tmp || echo "/tmp is not a separate mount (root disk)"
+                echo "--- df"; df -hT / /tmp
+                echo "--- ls -ld /tmp"; ls -ld /tmp
+                echo "--- is-enabled tmp.mount"; systemctl is-enabled tmp.mount
+                echo "--- leftover from before reboot"; ls -la /tmp/leftover 2>&1
+                echo "--- tmpfiles rules for /tmp"; systemd-tmpfiles --cat-config 2>/dev/null | grep -E '^[a-zA-Z].* /tmp(/| )' | head -20
+                echo "--- is-system-running: \$(systemctl is-system-running)"
+                echo "--- failed units"; systemctl --failed --no-legend --plain
+                echo "--- /tmp contents"; ls -la /tmp
+                echo "--- write 3G to /tmp (VM RAM 4G, tmpfs would be 2G)"
+                dd if=/dev/zero of=/tmp/big bs=1M count=3000 status=none && echo "WRITE OK" || echo "WRITE FAILED"
+                ls -lh /tmp/big; rm -f /tmp/big
+                echo "=== REPORT END"
+                sync; systemctl poweroff
+          EOF
+          printf 'instance-id: iid-14777\nlocal-hostname: vm14777\n' > meta-data
+          cloud-localds seed.img user-data meta-data
+          cat user-data
 
-      - name: Write 9G to /tmp as root
-        continue-on-error: true
+      - name: Boot VM (boot 1 applies change, boot 2 reports)
         run: |
-          sudo dd if=/dev/zero of=/tmp/bigroot bs=1M count=9000 status=none && echo "OK: 9G written" ; rc=$?
-          sudo ls -lh /tmp/bigroot || true
-          sudo rm -f /tmp/bigroot
-          exit $rc
+          timeout 20m qemu-system-x86_64 -enable-kvm -cpu host -m 4096 -smp 2 \
+            -drive file=disk.qcow2,if=virtio -drive file=seed.img,if=virtio,format=raw \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            -display none -serial file:serial.log || echo "qemu exit $?"
+          grep -a "=== BOOT1" serial.log || true
+          sed -n '/=== REPORT BEGIN/,/=== REPORT END/p' serial.log | tr -d '\r'
+          grep -aq "=== REPORT END" serial.log
 
-      - name: Workaround - mask tmp.mount and unmount
-        if: startsWith(matrix.runner, 'ubuntu-26.04')
+      - name: Upload serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-${{ matrix.variant }}
+          path: serial.log
+
+  build:
+    name: otelcol-contrib build (${{ matrix.os }}, ${{ matrix.tmp }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, tmp: default }
+          - { os: ubuntu-26.04, tmp: default }
+          - { os: ubuntu-26.04, tmp: disk }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Put /tmp on the root disk
+        if: matrix.tmp == 'disk'
         run: |
           sudo systemctl mask tmp.mount
           sudo umount -l /tmp
-          df -hT /tmp
-          findmnt /tmp || echo "/tmp is now on the root disk"
-          ls -ld /tmp
-
-      - name: Write 9G to /tmp after workaround
-        if: startsWith(matrix.runner, 'ubuntu-26.04')
+      - name: /tmp info
+        run: df -hT / /tmp; findmnt -no FSTYPE,SIZE,OPTIONS /tmp || echo "/tmp on root disk"
+      - uses: actions/checkout@v4
+        with:
+          repository: open-telemetry/opentelemetry-collector-releases
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "~1.26.0"
+          check-latest: true
+          cache: false
+      - uses: ./.github/actions/fetch-obi
+      - run: go mod tidy
+      - name: Build otelcol-contrib
+        env:
+          DISTRIBUTIONS: otelcol-contrib
         run: |
-          dd if=/dev/zero of=/tmp/big bs=1M count=9000 status=none
-          ls -lh /tmp/big
-          rm -f /tmp/big
+          ( while true; do echo "[mon $(date +%T)] $(df -h --output=target,used,avail /tmp / | tail -n +2 | tr '\n' ' ') mem_avail=$(awk '/MemAvailable/{print int($2/1024)"M"}' /proc/meminfo)"; sleep 60; done ) &
+          start=$(date +%s)
+          set +e
+          make build; rc=$?
+          echo "BUILD rc=$rc duration=$(( $(date +%s) - start ))s"
+          df -hT / /tmp
+          exit $rc
+
+  sideeffects:
+    name: side effects (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: What lives in tmpfs /tmp at job start
+        run: sudo ls -la /tmp; sudo du -sh /tmp/* 2>/dev/null || true
+
+      - name: RAM cost of filling tmpfs /tmp
+        run: |
+          free -m
+          sudo dd if=/dev/zero of=/tmp/fill bs=1M count=6000 status=none || true
+          echo "--- after writing 6G to tmpfs /tmp"
+          free -m
+          grep -E 'MemAvailable|Shmem:|SwapFree' /proc/meminfo
+          sudo rm -f /tmp/fill
+
+      - name: Speed, tmpfs /tmp vs root disk
+        run: |
+          curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz | xz -d > $RUNNER_TEMP/linux.tar
+          ls -lh $RUNNER_TEMP/linux.tar
+          bench() {
+            local dir=$1; mkdir -p $dir; sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+            local t0=$(date +%s.%N); tar -xf $RUNNER_TEMP/linux.tar -C $dir; local t1=$(date +%s.%N)
+            rm -rf $dir/*; local t2=$(date +%s.%N)
+            dd if=/dev/zero of=$dir/seq bs=1M count=2000 conv=fdatasync status=none; local t3=$(date +%s.%N)
+            rm -f $dir/seq
+            printf "%-28s untar(~90k files)=%5.1fs  rm -rf=%5.1fs  write2G+fsync=%5.1fs\n" "$2" $(echo "$t1-$t0" | bc) $(echo "$t2-$t1" | bc) $(echo "$t3-$t2" | bc)
+          }
+          for i in 1 2; do
+            bench /tmp/bench "tmpfs /tmp (run $i)"
+            bench $HOME/bench "root disk (run $i)"
+          done
