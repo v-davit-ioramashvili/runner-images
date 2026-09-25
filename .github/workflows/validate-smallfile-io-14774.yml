@@ -1,0 +1,58 @@
+# TEMPORARY - validation aid for #14774. Runs the reporter's small-file I/O benchmark (3 rounds) on
+# windows-2022 vs windows-2025 and dumps file-system minifilters + Defender state, to see whether
+# file create/delete is slower on the 2025 image with the same VM size. Delete before any PR.
+
+name: Validate small-file IO (#14774)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/codeql-win2025-14774*'
+
+jobs:
+  io:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Environment
+        shell: pwsh
+        run: |
+          Write-Host "Image: $env:ImageOS $env:ImageVersion  OS: $([Environment]::OSVersion.VersionString)  pwsh: $($PSVersionTable.PSVersion)"
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table -AutoSize
+          Get-Volume | Where-Object DriveLetter | Format-Table DriveLetter, FileSystem, AllocationUnitSize, Size -AutoSize
+          Write-Host "--- fltmc filters"; fltmc filters
+          Write-Host "--- fltmc instances (D:)"; fltmc instances -v D:
+          Write-Host "--- Defender"
+          Get-MpComputerStatus | Select-Object AMRunningMode, RealTimeProtectionEnabled, OnAccessProtectionEnabled, IoavProtectionEnabled, BehaviorMonitorEnabled | Format-List
+          Get-MpPreference | Select-Object DisableRealtimeMonitoring, ExclusionPath, EnableFileHashComputation | Format-List
+          Write-Host "--- NTFS behavior"; fsutil behavior query disablelastaccess; fsutil behavior query disable8dot3 D:
+
+      - name: Reporter benchmark x3 (small files on D:)
+        shell: pwsh
+        run: |
+          foreach ($round in 1..3) {
+            $dir = "$env:RUNNER_TEMP\iotest"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            1..10000 | ForEach-Object { [IO.File]::WriteAllBytes("$dir\$_.bin", (New-Object byte[] 4096)) }
+            $c = $sw.Elapsed.TotalSeconds; $sw.Restart()
+            1..10000 | ForEach-Object { $null = [IO.File]::ReadAllBytes("$dir\$_.bin") }
+            $r = $sw.Elapsed.TotalSeconds; $sw.Restart()
+            Remove-Item $dir -Recurse -Force
+            $d = $sw.Elapsed.TotalSeconds
+            # Same work in a tight .NET loop, without the PowerShell pipeline overhead
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $buf = New-Object byte[] 4096
+            $sw.Restart(); for ($i = 0; $i -lt 10000; $i++) { [IO.File]::WriteAllBytes("$dir\$i.bin", $buf) }; $c2 = $sw.Elapsed.TotalSeconds
+            $sw.Restart(); for ($i = 0; $i -lt 10000; $i++) { [IO.File]::Delete("$dir\$i.bin") }; $d2 = $sw.Elapsed.TotalSeconds
+            Remove-Item $dir -Recurse -Force
+            $line = "| $env:ImageOS | $round | {0:N2} | {1:N2} | {2:N2} | {3:N2} | {4:N2} |" -f $c, $r, $d, $c2, $d2
+            Write-Host $line
+            if ($round -eq 1) { "| Image | Round | Create (ps) | Read (ps) | Delete (ps) | Create (.NET loop) | Delete (.NET loop) |`n|---|---|---|---|---|---|---|" >> $env:GITHUB_STEP_SUMMARY }
+            $line >> $env:GITHUB_STEP_SUMMARY
+          }

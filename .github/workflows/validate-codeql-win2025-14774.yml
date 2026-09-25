@@ -9,9 +9,6 @@ name: Validate CodeQL Win2025 (#14774)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'validate/codeql-win2025-14774*'
 
 jobs:
   build:
