@@ -32,7 +32,7 @@ jobs:
           ls /usr/bin/g++-[0-9]* /usr/lib/llvm-*/bin/clang
           # save the shipped symlinks so each variant starts from the real image state
           for f in /usr/lib/bfd-plugins/LLVMgold-*.so; do echo "$f $(readlink "$f")"; done > "$RUNNER_TEMP/plugins.txt"
-          toolset=images/ubuntu/toolsets/toolset-$(. /etc/os-release; echo ${VERSION_ID/./})$([[ $(uname -m) == aarch64 ]] && echo -arm64).json
+          toolset=images/ubuntu/toolsets/toolset-$(. /etc/os-release; echo ${VERSION_ID/./})$([[ $(uname -m) == aarch64 ]] && echo -arm64 || true).json
           echo "TOOLSET=$toolset" >> "$GITHUB_ENV"
           jq -c .clang "$toolset"
 
