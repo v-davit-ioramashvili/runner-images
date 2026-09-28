@@ -4,58 +4,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  brew:
-    name: Brew ${{ matrix.os }}
+  workaround:
+    name: Workaround ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os:
           - macos-15
-          - macos-15-intel
           - macos-26
-          - macos-26-intel
-          - xcode-27
     steps:
-      - name: Versions
+      - name: Disable git auto-maintenance, then double update (fresh runner)
         run: |
-          echo "image os: ${{ matrix.os }}"
-          echo "IMAGE_VERSION=$IMAGE_VERSION"
-          brew --version
-          git --version
-          echo "brew prefix: $(brew --prefix)"
-
-      - name: First brew update
-        run: brew update
-
-      - name: Diagnostics after first update
-        run: |
-          set +e
-          LOCK="$(brew --prefix)/var/homebrew/locks/update"
-          echo "=== lock file: $LOCK ==="
-          ls -l "$LOCK" 2>&1
-          echo "=== lsof holders of lock file ==="
-          /usr/sbin/lsof "$LOCK" 2>&1
-          echo "=== git / fsmonitor background processes ==="
-          pgrep -fl 'fsmonitor|git-daemon|git maintenance|git' 2>&1
-          echo "=== core.fsmonitor config across taps ==="
-          for d in "$(brew --repository)"/Library/Taps/*/*; do
-            if [ -d "$d/.git" ]; then
-              echo "$d -> fsmonitor=$(git -C "$d" config --get core.fsmonitor)"
-            fi
-          done
-          echo "=== global/system git fsmonitor ==="
-          git config --show-origin --get-all core.fsmonitor 2>&1
-          echo "=== end diagnostics ==="
-
-      - name: Second brew update (expected failure point)
-        run: |
-          set +e
-          brew update
-          echo "SECOND_UPDATE_EXIT=$?"
-
-      - name: Reporter's exact repro (chained)
-        run: |
+          git config --global maintenance.auto false
+          git config --global gc.auto 0
           set +e
           brew update && brew update
-          echo "CHAINED_EXIT=$?"
+          echo "WORKAROUND_CHAINED_EXIT=$?"
+          echo "=== lsof on lock after ==="
+          /usr/sbin/lsof "$(brew --prefix)/var/homebrew/locks/update" 2>&1
