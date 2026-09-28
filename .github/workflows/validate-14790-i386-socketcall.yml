@@ -1,0 +1,85 @@
+name: validate-14790-i386-socketcall
+
+# Validation for actions/runner-images#14790
+# Ubuntu 26.04 ships Docker 29.4.2 (seccomp v0.2.2) which denies socketcall(2),
+# breaking name resolution in i386 glibc containers. 29.4.3+ (seccomp v0.2.3)
+# reverts that deny. This workflow proves the repro and the fix on a real runner.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Environment
+        run: |
+          set -x
+          lsb_release -a || true
+          echo "docker server: $(docker version --format '{{.Server.Version}}')"
+          dpkg -l 'docker-ce*' | grep -E 'docker-ce' || true
+
+      - name: Pull test images
+        run: |
+          set -euxo pipefail
+          docker pull --platform linux/386 i386/debian:bookworm
+          docker pull --platform linux/386 i386/alpine
+
+      - name: "Repro: i386 glibc, DEFAULT seccomp (expect FAIL on 29.4.2)"
+        run: |
+          set +e
+          docker run --rm --platform linux/386 i386/debian:bookworm getent hosts github.com
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::Expected getent to FAIL under default seccomp on 29.4.2, but it succeeded (no repro)."
+            exit 1
+          fi
+          echo "CONFIRMED: i386 glibc name resolution is blocked under the default profile."
+
+      - name: "Control: i386 glibc, seccomp=unconfined (expect PASS)"
+        run: |
+          set +e
+          docker run --rm --platform linux/386 --security-opt seccomp=unconfined \
+            i386/debian:bookworm getent hosts github.com
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          [ "$rc" -eq 0 ] || { echo "::error::seccomp=unconfined should resolve, got exit $rc"; exit 1; }
+          echo "CONFIRMED: disabling seccomp restores resolution (isolates the profile as the cause)."
+
+      - name: "Control: i386 musl/alpine, DEFAULT seccomp (expect PASS, informational)"
+        run: |
+          set +e
+          docker run --rm --platform linux/386 i386/alpine nslookup github.com
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "As expected: musl uses direct socket(2), unaffected by the socketcall deny."
+          else
+            echo "::warning::musl/alpine control returned $rc (unexpected; may be a busybox nslookup quirk)."
+          fi
+
+      - name: "Fix: upgrade Docker to 29.8.1 and restart the daemon"
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          VER="5:29.8.1-1~ubuntu.26.04~resolute"
+          sudo apt-get install -y --allow-downgrades \
+            docker-ce="$VER" docker-ce-cli="$VER"
+          sudo systemctl restart docker
+          # wait for the daemon to come back
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          echo "docker server now: $(docker version --format '{{.Server.Version}}')"
+
+      - name: "Verify fix: i386 glibc, DEFAULT seccomp (expect PASS on 29.8.1)"
+        run: |
+          set +e
+          docker run --rm --platform linux/386 i386/debian:bookworm getent hosts github.com
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          [ "$rc" -eq 0 ] || { echo "::error::After upgrade to 29.8.1, i386 glibc still cannot resolve (exit $rc)"; exit 1; }
+          echo "CONFIRMED FIX: 29.8.1 default seccomp resolves i386 glibc names."
