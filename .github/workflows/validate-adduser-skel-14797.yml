@@ -1,0 +1,47 @@
+# TEMPORARY - repro for #14797 (adduser fails on 26.04 due to /etc/skel/.nvm/test file names).
+name: Validate adduser skel 14797
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/adduser-skel-14797*'
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Info
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          dpkg-query -W adduser
+          echo "LANG=$LANG LC_ALL=$LC_ALL"; locale
+          ls /etc/skel/.nvm/test | head
+          echo "Non-ASCII paths under /etc/skel:"
+          sudo find /etc/skel -name '*[! -~]*' | wc -l
+          sudo find /etc/skel -name '*[! -~]*' | grep -v '/.nvm/test/' | head -20 || true
+          sudo du -sh /etc/skel/.nvm/test
+          grep -n -B3 -A12 'sub sanitize_string' /usr/share/perl5/Debian/AdduserCommon.pm || true
+
+      - name: adduser as-is
+        continue-on-error: true
+        run: sudo adduser --disabled-password --gecos "" asis1
+
+      - name: adduser as-is (LC_ALL=C.UTF-8)
+        continue-on-error: true
+        run: sudo LC_ALL=C.UTF-8 adduser --disabled-password --gecos "" asis2
+
+      - name: useradd -m as-is
+        continue-on-error: true
+        run: sudo useradd -m asis3 && sudo ls /home/asis3/.nvm | head -3
+
+      - name: Remove .nvm/test, then adduser
+        run: |
+          sudo rm -rf /etc/skel/.nvm/test
+          sudo adduser --disabled-password --gecos "" fixed1
+          sudo ls -a /home/fixed1/.nvm | head
+          sudo -iu fixed1 bash -lc 'nvm --version && nvm ls'
