@@ -7,6 +7,9 @@ name: validate-14790-i386-socketcall
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - validate/14790-i386-socketcall
 
 jobs:
   probe:
