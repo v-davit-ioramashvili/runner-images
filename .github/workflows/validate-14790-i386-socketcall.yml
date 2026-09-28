@@ -68,6 +68,15 @@ jobs:
       - name: "Fix: upgrade Docker to 29.8.1 and restart the daemon"
         run: |
           set -euxo pipefail
+          # The runner image has no download.docker.com apt source at runtime
+          # (docker-ce is only known as a virtual package provided by moby-*),
+          # so re-add the official Docker repo the way install-docker.sh does.
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/docker-validate.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker-validate.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker-validate.gpg] https://download.docker.com/linux/ubuntu resolute stable" \
+            | sudo tee /etc/apt/sources.list.d/docker-validate.list
           sudo apt-get update
           VER="5:29.8.1-1~ubuntu.26.04~resolute"
           sudo apt-get install -y --allow-downgrades \
