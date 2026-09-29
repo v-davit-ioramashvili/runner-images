@@ -8,90 +8,33 @@ on:
       - 'validate/edge-win2022-14810'
 
 jobs:
-  edge:
+  edge-msi:
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - name: Image + Edge version
+      - name: Install latest Edge Stable MSI and verify
         shell: pwsh
         run: |
+          $edgeExe = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
           Write-Host "ImageVersion = $env:ImageVersion"
-          (Get-CimInstance Win32_OperatingSystem) | Format-List Caption, Version, BuildNumber
-          $exe = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe").'(default)'
-          Write-Host "msedge.exe = $exe"
-          Write-Host "Edge version = $([System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion)"
-          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge\Application" -Directory | Select-Object Name, LastWriteTime | Format-Table
-          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate" -ErrorAction SilentlyContinue | Select-Object Name | Format-Table
-
-      - name: EdgeUpdate policies and client state
-        shell: pwsh
-        run: |
-          foreach ($p in 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate','HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\EdgeUpdate','HKLM:\SOFTWARE\Policies\Microsoft\Edge') {
-            Write-Host "== $p"; if (Test-Path $p) { Get-ItemProperty $p | Out-Host } else { Write-Host "(absent)" }
-          }
-          $c = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
-          Write-Host "== $c"; if (Test-Path $c) { Get-ItemProperty $c | Out-Host } else { Write-Host "(absent)" }
-
-      - name: EdgeUpdate services, tasks, logs
-        shell: pwsh
-        run: |
-          Get-Service edgeupdate*, MicrosoftEdgeElevationService -ErrorAction SilentlyContinue | Format-Table Name, Status, StartType -AutoSize | Out-Host
-          Get-ScheduledTask -TaskName '*Edge*' -ErrorAction SilentlyContinue | Format-Table TaskName, State -AutoSize | Out-Host
-          Get-ScheduledTask -TaskName '*Edge*' -ErrorAction SilentlyContinue | ForEach-Object { $i = $_ | Get-ScheduledTaskInfo; "$($_.TaskName) last=$($i.LastRunTime) result=$($i.LastTaskResult)" } | Out-Host
-          Get-ChildItem 'C:\ProgramData\Microsoft\EdgeUpdate' -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String -Width 300 | Write-Host
-          $log = 'C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log'
-          if (Test-Path $log) {
-            Write-Host "== update-related lines"
-            Select-String -Path $log -Pattern 'version|update_check|Install|error|pv=|nextversion|UpdateResponse|ping' | Select-Object -First 150 | ForEach-Object { $_.Line } | Out-Host
-          } else { Write-Host "no EdgeUpdate log" }
-          Get-ChildItem 'C:\Windows\Temp' -Filter '*Edge*' -ErrorAction SilentlyContinue | Out-Host
-
-      - name: EdgeUpdate log during image build (after base image date)
-        shell: pwsh
-        run: |
-          $log = 'C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log'
-          Get-Content $log | Where-Object { $_ -match '^\[09/(1[0-9]|2[0-9])/26' -and $_ -notmatch 'OmahaPolicyManager|msedgeupdate.dll\]\[version|Group Policy' } | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0,400) } else { $_ } } | Out-Host
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: edgeupdate-log-${{ matrix.os }}
-          path: C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log
-
-      - name: Try manual Edge update via (renamed) EdgeUpdate
-        shell: pwsh
-        run: |
-          $exe = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\Disabled_MicrosoftEdgeUpdate.exe"
-          $tmp = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
-          Copy-Item $exe $tmp
-          $p = Start-Process $tmp -ArgumentList '/ua /installsource scheduler' -Wait -PassThru
-          Write-Host "exit=$($p.ExitCode)"
-          Start-Sleep 90
-          $v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe").ProductVersion
-          Write-Host "Edge version after manual update = $v"
-          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge\Application" -Directory | Select-Object Name | Out-Host
-          (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}') | Select-Object pv, opv | Out-Host
-
-      - name: Windows Update history (what was installed during image build)
-        shell: pwsh
-        run: |
-          $s = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
-          $n = $s.GetTotalHistoryCount()
-          Write-Host "History entries: $n"
-          if ($n -eq 0) { exit 0 }
-          $s.QueryHistory(0, $n) | Select-Object Date, ResultCode, Title | Sort-Object Date | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
-          Write-Host "== Edge-related history"
-          $s.QueryHistory(0, $n) | Where-Object Title -match 'Edge' | Select-Object Date, ResultCode, Title | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
-
-      - name: Updates offered now (Microsoft Update)
-        shell: pwsh
-        run: |
-          Start-Service wuauserv
-          Get-WUServiceManager | Format-Table ServiceID, IsManaged, IsDefaultAUService, Name -AutoSize | Out-String -Width 300 | Write-Host
-          $u = Get-WindowsUpdate -MicrosoftUpdate
-          $u | Select-Object KB, Size, Title | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
-          Write-Host "== Edge offers"
-          $u | Where-Object Title -match 'Edge' | Format-List Title, KB, Size | Out-Host
+          Write-Host "Before = $([System.Diagnostics.FileVersionInfo]::GetVersionInfo($edgeExe).ProductVersion)"
+          $products = Invoke-RestMethod "https://edgeupdates.microsoft.com/api/products"
+          $release = ($products | Where-Object Product -eq 'Stable').Releases |
+            Where-Object { $_.Platform -eq 'Windows' -and $_.Architecture -eq 'x64' } |
+            Sort-Object { [version]$_.ProductVersion } -Descending | Select-Object -First 1
+          $msi = $release.Artifacts | Where-Object ArtifactName -eq 'msi'
+          Write-Host "Latest Stable = $($release.ProductVersion) ($($msi.Location))"
+          $path = "$env:TEMP\MicrosoftEdgeEnterpriseX64.msi"
+          Invoke-WebRequest $msi.Location -OutFile $path
+          $hash = (Get-FileHash $path -Algorithm SHA256).Hash
+          Write-Host "SHA256 match = $($hash -eq $msi.Hash)"
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$path`" /qn /norestart" -Wait -PassThru
+          Write-Host "msiexec exit = $($p.ExitCode)"
+          $after = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($edgeExe).ProductVersion
+          Write-Host "After = $after"
+          if ([version]$after -ne [version]$release.ProductVersion) { throw "Edge not updated" }
+          & $edgeExe --version
