@@ -36,12 +36,41 @@ jobs:
           $c = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
           Write-Host "== $c"; if (Test-Path $c) { Get-ItemProperty $c | Out-Host } else { Write-Host "(absent)" }
 
+      - name: EdgeUpdate services, tasks, logs
+        shell: pwsh
+        run: |
+          Get-Service edgeupdate*, MicrosoftEdgeElevationService -ErrorAction SilentlyContinue | Format-Table Name, Status, StartType -AutoSize | Out-Host
+          Get-ScheduledTask -TaskName '*Edge*' -ErrorAction SilentlyContinue | Format-Table TaskName, State -AutoSize | Out-Host
+          Get-ScheduledTask -TaskName '*Edge*' -ErrorAction SilentlyContinue | ForEach-Object { $i = $_ | Get-ScheduledTaskInfo; "$($_.TaskName) last=$($i.LastRunTime) result=$($i.LastTaskResult)" } | Out-Host
+          Get-ChildItem 'C:\ProgramData\Microsoft\EdgeUpdate' -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String -Width 300 | Write-Host
+          $log = 'C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log'
+          if (Test-Path $log) {
+            Write-Host "== update-related lines"
+            Select-String -Path $log -Pattern 'version|update_check|Install|error|pv=|nextversion|UpdateResponse|ping' | Select-Object -First 150 | ForEach-Object { $_.Line } | Out-Host
+          } else { Write-Host "no EdgeUpdate log" }
+          Get-ChildItem 'C:\Windows\Temp' -Filter '*Edge*' -ErrorAction SilentlyContinue | Out-Host
+
+      - name: Try manual Edge update via (renamed) EdgeUpdate
+        shell: pwsh
+        run: |
+          $exe = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\Disabled_MicrosoftEdgeUpdate.exe"
+          $tmp = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
+          Copy-Item $exe $tmp
+          $p = Start-Process $tmp -ArgumentList '/ua /installsource scheduler' -Wait -PassThru
+          Write-Host "exit=$($p.ExitCode)"
+          Start-Sleep 90
+          $v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe").ProductVersion
+          Write-Host "Edge version after manual update = $v"
+          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge\Application" -Directory | Select-Object Name | Out-Host
+          (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}') | Select-Object pv, opv | Out-Host
+
       - name: Windows Update history (what was installed during image build)
         shell: pwsh
         run: |
           $s = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
           $n = $s.GetTotalHistoryCount()
           Write-Host "History entries: $n"
+          if ($n -eq 0) { exit 0 }
           $s.QueryHistory(0, $n) | Select-Object Date, ResultCode, Title | Sort-Object Date | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
           Write-Host "== Edge-related history"
           $s.QueryHistory(0, $n) | Where-Object Title -match 'Edge' | Select-Object Date, ResultCode, Title | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
