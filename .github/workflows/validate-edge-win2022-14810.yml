@@ -50,6 +50,17 @@ jobs:
           } else { Write-Host "no EdgeUpdate log" }
           Get-ChildItem 'C:\Windows\Temp' -Filter '*Edge*' -ErrorAction SilentlyContinue | Out-Host
 
+      - name: EdgeUpdate log during image build (after base image date)
+        shell: pwsh
+        run: |
+          $log = 'C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log'
+          Get-Content $log | Where-Object { $_ -match '^\[09/(1[0-9]|2[0-9])/26' -and $_ -notmatch 'OmahaPolicyManager|msedgeupdate.dll\]\[version|Group Policy' } | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0,400) } else { $_ } } | Out-Host
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edgeupdate-log-${{ matrix.os }}
+          path: C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log
+
       - name: Try manual Edge update via (renamed) EdgeUpdate
         shell: pwsh
         run: |
