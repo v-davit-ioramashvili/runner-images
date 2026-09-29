@@ -1,0 +1,57 @@
+# TEMPORARY - validation aid for #14810 (Edge stuck at 152 on windows-2022).
+name: Validate Edge updates 14810
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/edge-win2022-14810'
+
+jobs:
+  edge:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Image + Edge version
+        shell: pwsh
+        run: |
+          Write-Host "ImageVersion = $env:ImageVersion"
+          (Get-CimInstance Win32_OperatingSystem) | Format-List Caption, Version, BuildNumber
+          $exe = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe").'(default)'
+          Write-Host "msedge.exe = $exe"
+          Write-Host "Edge version = $([System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion)"
+          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge\Application" -Directory | Select-Object Name, LastWriteTime | Format-Table
+          Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate" -ErrorAction SilentlyContinue | Select-Object Name | Format-Table
+
+      - name: EdgeUpdate policies and client state
+        shell: pwsh
+        run: |
+          foreach ($p in 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate','HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\EdgeUpdate','HKLM:\SOFTWARE\Policies\Microsoft\Edge') {
+            Write-Host "== $p"; if (Test-Path $p) { Get-ItemProperty $p | Out-Host } else { Write-Host "(absent)" }
+          }
+          $c = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+          Write-Host "== $c"; if (Test-Path $c) { Get-ItemProperty $c | Out-Host } else { Write-Host "(absent)" }
+
+      - name: Windows Update history (what was installed during image build)
+        shell: pwsh
+        run: |
+          $s = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+          $n = $s.GetTotalHistoryCount()
+          Write-Host "History entries: $n"
+          $s.QueryHistory(0, $n) | Select-Object Date, ResultCode, Title | Sort-Object Date | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
+          Write-Host "== Edge-related history"
+          $s.QueryHistory(0, $n) | Where-Object Title -match 'Edge' | Select-Object Date, ResultCode, Title | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
+
+      - name: Updates offered now (Microsoft Update)
+        shell: pwsh
+        run: |
+          Start-Service wuauserv
+          Get-WUServiceManager | Format-Table ServiceID, IsManaged, IsDefaultAUService, Name -AutoSize | Out-String -Width 300 | Write-Host
+          $u = Get-WindowsUpdate -MicrosoftUpdate
+          $u | Select-Object KB, Size, Title | Format-Table -AutoSize -Wrap | Out-String -Width 300 | Write-Host
+          Write-Host "== Edge offers"
+          $u | Where-Object Title -match 'Edge' | Format-List Title, KB, Size | Out-Host
