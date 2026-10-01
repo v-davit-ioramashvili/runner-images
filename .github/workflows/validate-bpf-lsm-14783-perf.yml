@@ -1,0 +1,82 @@
+# TEMPORARY - validation aid for #14783. Not part of the PR.
+# Boots each runner's own kernel in QEMU/KVM twice (current LSM list vs +bpf) and runs a
+# syscall micro-benchmark that hits LSM hooks (open/stat/close, mmap, socket) plus getppid as a no-hook baseline.
+name: Validate BPF LSM perf 14783
+
+on:
+  push:
+    branches:
+      - 'validate/bpf-lsm-14783-perf*'
+
+jobs:
+  perf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Build benchmark + initramfs
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y qemu-system-x86 busybox-static cpio >/dev/null
+          cat > /tmp/bench.c <<'C'
+          #define _GNU_SOURCE
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <fcntl.h>
+          #include <unistd.h>
+          #include <time.h>
+          #include <sys/stat.h>
+          #include <sys/mman.h>
+          #include <sys/socket.h>
+          #include <sys/syscall.h>
+          static double now(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec*1e9+t.tv_nsec;}
+          static int cmp(const void*a,const void*b){double x=*(double*)a,y=*(double*)b;return x<y?-1:x>y;}
+          #define N 300000
+          #define R 7
+          #define BENCH(name, body) { double r[R]; for(int k=0;k<R;k++){double t=now(); for(int i=0;i<N;i++){body;} r[k]=(now()-t)/N;} qsort(r,R,sizeof r[0],cmp); printf("BENCH %-14s %8.1f ns/op\n", name, r[R/2]); }
+          int main(void){
+            int f=open("/bench.tmp",O_CREAT|O_RDWR,0644); write(f,"x",1); close(f);
+            struct stat st;
+            BENCH("getppid", syscall(SYS_getppid));
+            BENCH("open+close", {int d=open("/bench.tmp",O_RDONLY); close(d);});
+            BENCH("stat", stat("/bench.tmp",&st));
+            BENCH("mmap+munmap", {void*p=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); munmap(p,4096);});
+            BENCH("socket+close", {int s=socket(AF_UNIX,SOCK_DGRAM,0); close(s);});
+            return 0;
+          }
+          C
+          gcc -O2 -static -o /tmp/bench /tmp/bench.c
+          mkdir -p /tmp/ir/bin && cp /bin/busybox /tmp/ir/bin/ && cp /tmp/bench /tmp/ir/bin/
+          printf '%s\n' '#!/bin/busybox sh' \
+            '/bin/busybox mkdir -p /sys /proc' \
+            '/bin/busybox mount -t sysfs sysfs /sys' \
+            '/bin/busybox mount -t securityfs securityfs /sys/kernel/security' \
+            'echo "ACTIVE_LSM=$(/bin/busybox cat /sys/kernel/security/lsm)"' \
+            '/bin/bench' \
+            '/bin/busybox poweroff -f' > /tmp/ir/init
+          chmod +x /tmp/ir/init
+          (cd /tmp/ir && find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.gz)
+          sudo cat "/boot/vmlinuz-$(uname -r)" > /tmp/vmlinuz
+          sudo chmod 666 /dev/kvm
+
+      - name: Run baseline vs +bpf (3 boots each, interleaved)
+        run: |
+          base=landlock,lockdown,yama,integrity,apparmor
+          for round in 1 2 3; do
+            for cfg in base bpf; do
+              lsm=$base; [ $cfg = bpf ] && lsm=$base,bpf
+              timeout 300 qemu-system-x86_64 -M q35 -m 1024 -smp 1 -enable-kvm -cpu host -nographic -no-reboot \
+                -kernel /tmp/vmlinuz -initrd /tmp/initrd.gz \
+                -append "console=ttyS0 quiet panic=-1 rdinit=/init mitigations=auto lsm=$lsm" 2>&1 \
+                | tr -d '\r' | grep -aE '^(ACTIVE_LSM|BENCH)' | sed "s/^/$cfg r$round /" | tee -a /tmp/results.txt
+            done
+          done
+          echo "=== median of 3 boots (ns/op) ==="
+          for b in getppid open+close stat mmap+munmap socket+close; do
+            m() { grep -a "^$1 r[0-9] BENCH $b " /tmp/results.txt | awk '{print $(NF-1)}' | sort -n | sed -n 2p; }
+            B=$(m base); P=$(m bpf)
+            awk -v b="$b" -v x="$B" -v y="$P" 'BEGIN{printf "SUMMARY %-14s base %7.1f  +bpf %7.1f  delta %+5.1f%%\n", b, x, y, (y-x)/x*100}'
+          done
