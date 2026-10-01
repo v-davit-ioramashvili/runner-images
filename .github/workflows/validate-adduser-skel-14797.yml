@@ -14,11 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm]
+        include:
+          - os: ubuntu-26.04
+            toolset: toolset-2604.json
+          - os: ubuntu-26.04-arm
+            toolset: toolset-2604-arm64.json
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       HELPER_SCRIPTS: ${{ github.workspace }}/images/ubuntu/scripts/helpers
+      INSTALLER_SCRIPT_FOLDER: /imagegeneration/installers
     steps:
       - uses: actions/checkout@v5
 
@@ -28,14 +33,19 @@ jobs:
           echo "ImageVersion=$ImageVersion"
           # install-nvm.sh does `mkdir $NVM_DIR`, so move the image's copy aside
           sudo mv /etc/skel/.nvm /tmp/nvm-from-image
-          sudo install -d /imagegeneration/tests
+          sudo install -d /imagegeneration/tests "$INSTALLER_SCRIPT_FOLDER"
+          sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" "$INSTALLER_SCRIPT_FOLDER/toolset.json"
           sudo cp images/ubuntu/scripts/tests/*.ps1 images/ubuntu/scripts/tests/*.psm1 /imagegeneration/tests/
           sudo chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
           sudo ln -sf "$HELPER_SCRIPTS/invoke-tests.sh" /usr/local/bin/invoke_tests
           sudo pwsh -Command "if (-not (Get-Module -ListAvailable Pester)) { Install-Module Pester -Force -Scope AllUsers -SkipPublisherCheck }"
 
       - name: Run the real install-nvm.sh from this branch (includes Pester 'Tools/nvm')
-        run: sudo -E HELPER_SCRIPTS="$HELPER_SCRIPTS" bash images/ubuntu/scripts/build/install-nvm.sh
+        run: |
+          # bash -e: the script's shebang has -e, which `bash file` would otherwise drop
+          sudo -E HELPER_SCRIPTS="$HELPER_SCRIPTS" INSTALLER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER" bash -e images/ubuntu/scripts/build/install-nvm.sh 2>&1 | tee /tmp/install.log
+          grep -E "Tests Passed: [1-9]" /tmp/install.log
+          grep -E "Failed: 0," /tmp/install.log
 
       - name: Check 1 - skel is clean and adduser works
         run: |
@@ -48,10 +58,12 @@ jobs:
       - name: Check 2 - nvm upgrade path with test/ deleted
         run: |
           set -euxo pipefail
-          sudo -iu tuser bash -c 'git -C ~/.nvm status --short | head -3; echo "deleted files: $(git -C ~/.nvm status --short | grep -c "^ D" || true)"'
+          U='sudo -iu tuser env NVM_DIR=/home/tuser/.nvm PROFILE=/dev/null bash -c'
+          $U 'cd ~/.nvm && echo "start: $(git describe --tags); deleted: $(git status --short | grep -c "^ D")"'
           for v in v0.40.7 v0.40.8; do
-            echo "=== installer $v over the trimmed checkout ==="
-            sudo -iu tuser bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | PROFILE=/dev/null bash"
-            sudo -iu tuser bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm use --lts >/dev/null && node -v'
-            sudo -iu tuser bash -c 'echo "git status lines: $(git -C ~/.nvm status --short | wc -l); test/ present: $(test -d ~/.nvm/test && echo yes || echo no)"'
+            echo "=== installer $v over ~/.nvm ==="
+            $U "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | bash"
+            $U 'source ~/.nvm/nvm.sh && echo "nvm $(nvm --version)" && nvm use --lts >/dev/null && node -v'
+            $U 'cd ~/.nvm && echo "HEAD: $(git describe --tags); status lines: $(git status --short | wc -l); test/ present: $(test -d test && echo yes || echo no)"'
           done
+          test ! -e '/home/tuser/$HOME'
