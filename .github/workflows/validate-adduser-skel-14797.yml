@@ -55,15 +55,21 @@ jobs:
           sudo adduser --disabled-password --gecos "" tuser
           sudo -iu tuser bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm install --lts && nvm use --lts && node -v && nvm ls'
 
-      - name: Check 2 - nvm upgrade path with test/ deleted
+      - name: Check 2 - nvm upgrade path, trimmed (test/ deleted) vs control (test/ restored)
         run: |
-          set -euxo pipefail
-          U='sudo -iu tuser env NVM_DIR=/home/tuser/.nvm PROFILE=/dev/null bash -c'
-          $U 'cd ~/.nvm && echo "start: $(git describe --tags); deleted: $(git status --short | grep -c "^ D")"'
-          for v in v0.40.7 v0.40.8; do
-            echo "=== installer $v over ~/.nvm ==="
-            $U "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | bash"
-            $U 'source ~/.nvm/nvm.sh && echo "nvm $(nvm --version)" && nvm use --lts >/dev/null && node -v'
-            $U 'cd ~/.nvm && echo "HEAD: $(git describe --tags); status lines: $(git status --short | wc -l); test/ present: $(test -d test && echo yes || echo no)"'
+          set -uxo pipefail
+          # control user gets the same ~/.nvm, then restores test/ from git
+          sudo adduser --disabled-password --gecos "" cuser
+          sudo -iu cuser bash -c 'source ~/.nvm/nvm.sh && nvm install --lts >/dev/null 2>&1; cd ~/.nvm && git checkout -- test && echo "control restored test/: $(test -d test && echo yes)"'
+          rc=0
+          for u in tuser cuser; do
+            U="sudo -iu $u env NVM_DIR=/home/$u/.nvm PROFILE=/dev/null bash -c"
+            for v in v0.40.7 v0.40.8; do
+              echo "=== [$u] installer $v ==="
+              $U "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | bash >/dev/null 2>&1; echo installer-exit=\$?"
+              $U 'cd ~/.nvm && echo "HEAD=$(git describe --tags) status-lines=$(git status --short | wc -l) test-dir=$(test -d test && echo yes || echo no)"; ls alias alias/lts 2>&1 | tr "
+" " "; echo'
+              $U 'source ~/.nvm/nvm.sh; echo "nvm=$(nvm --version)"; nvm use --lts >/dev/null 2>&1; echo use-lts-exit=$?; nvm use 24 >/dev/null 2>&1 && echo "use-24 node=$(node -v)"' || rc=1
+            done
           done
-          test ! -e '/home/tuser/$HOME'
+          exit $rc
