@@ -1,4 +1,6 @@
-# TEMPORARY - validate #14797 workaround with a real Dokku install (same steps as reporter).
+# TEMPORARY - validate the #14797 fix: run the real install-nvm.sh from this branch
+# (removes $NVM_DIR/test), then check adduser, the nvm Pester test, nvm for a new
+# user, and that nvm's own upgrade path still works with test/ deleted.
 name: Validate adduser skel 14797
 
 on:
@@ -8,32 +10,48 @@ on:
       - 'validate/adduser-skel-14797*'
 
 jobs:
-  dokku:
+  fix:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, ubuntu-26.04-arm]
-        workaround: [false, true]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      HELPER_SCRIPTS: ${{ github.workspace }}/images/ubuntu/scripts/helpers
     steps:
-      - name: Workaround
-        if: matrix.workaround
-        run: sudo rm -rf /etc/skel/.nvm/test
+      - uses: actions/checkout@v5
 
-      - name: Install Dokku (reporter's steps)
+      - name: Stage build environment
         run: |
-          set -x
+          set -euxo pipefail
           echo "ImageVersion=$ImageVersion"
-          sudo install -m 0755 -d /etc/apt/keyrings
-          wget -nv -O - https://packagecloud.io/dokku/dokku/gpgkey | sudo gpg --dearmor -o /etc/apt/keyrings/dokku-key.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/dokku-key.gpg] https://packagecloud.io/dokku/dokku/ubuntu/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/dokku.list
-          sudo apt-get update -q
-          echo dokku dokku/skip_key_file boolean true | sudo debconf-set-selections
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y dokku
+          # install-nvm.sh does `mkdir $NVM_DIR`, so move the image's copy aside
+          sudo mv /etc/skel/.nvm /tmp/nvm-from-image
+          sudo install -d /imagegeneration/tests
+          sudo cp images/ubuntu/scripts/tests/*.ps1 images/ubuntu/scripts/tests/*.psm1 /imagegeneration/tests/
+          sudo chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
+          sudo ln -sf "$HELPER_SCRIPTS/invoke-tests.sh" /usr/local/bin/invoke_tests
+          sudo pwsh -Command "if (-not (Get-Module -ListAvailable Pester)) { Install-Module Pester -Force -Scope AllUsers -SkipPublisherCheck }"
 
-      - name: Verify
+      - name: Run the real install-nvm.sh from this branch (includes Pester 'Tools/nvm')
+        run: sudo -E HELPER_SCRIPTS="$HELPER_SCRIPTS" bash images/ubuntu/scripts/build/install-nvm.sh
+
+      - name: Check 1 - skel is clean and adduser works
         run: |
-          dokku version
-          getent passwd dokku
-          sudo ls -a /home/dokku | head -20
-          sudo -u dokku bash -lc 'echo HOME=$HOME; source ~/.nvm/nvm.sh && nvm --version'
+          set -euxo pipefail
+          test ! -e /etc/skel/.nvm/test
+          test "$(sudo find /etc/skel -name '*[! -~]*' | wc -l)" = 0
+          sudo adduser --disabled-password --gecos "" tuser
+          sudo -iu tuser bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm install --lts && nvm use --lts && node -v && nvm ls'
+
+      - name: Check 2 - nvm upgrade path with test/ deleted
+        run: |
+          set -euxo pipefail
+          sudo -iu tuser bash -c 'git -C ~/.nvm status --short | head -3; echo "deleted files: $(git -C ~/.nvm status --short | grep -c "^ D" || true)"'
+          for v in v0.40.7 v0.40.8; do
+            echo "=== installer $v over the trimmed checkout ==="
+            sudo -iu tuser bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | PROFILE=/dev/null bash"
+            sudo -iu tuser bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm use --lts >/dev/null && node -v'
+            sudo -iu tuser bash -c 'echo "git status lines: $(git -C ~/.nvm status --short | wc -l); test/ present: $(test -d ~/.nvm/test && echo yes || echo no)"'
+          done
