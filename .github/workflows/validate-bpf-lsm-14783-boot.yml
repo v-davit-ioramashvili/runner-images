@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Apply drop-in and regenerate grub.cfg
         run: |
@@ -34,33 +34,40 @@ jobs:
         run: |
           sudo apt-get -qq update >/dev/null
           if [ "$(uname -m)" = "x86_64" ]; then
-            sudo apt-get -qq install -y qemu-system-x86 >/dev/null
-            qemu=(qemu-system-x86_64 -M q35 -m 2048) ; con=ttyS0
+            sudo apt-get -qq install -y qemu-system-x86 busybox-static cpio >/dev/null
+            qemu=(qemu-system-x86_64 -M q35 -m 2048) ; con="console=ttyS0"
           else
-            sudo apt-get -qq install -y qemu-system-arm qemu-efi-aarch64 >/dev/null
-            qemu=(qemu-system-aarch64 -M virt -m 2048) ; con=ttyAMA0
+            sudo apt-get -qq install -y qemu-system-arm busybox-static cpio >/dev/null
+            qemu=(qemu-system-aarch64 -M virt -m 2048) ; con="console=ttyAMA0 earlycon"
           fi
-          if [ -w /dev/kvm ] || sudo chmod 666 /dev/kvm 2>/dev/null; then
+          if [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm 2>/dev/null; then
             qemu+=(-enable-kvm -cpu host); echo "KVM: yes"
           else
             qemu+=(-cpu max); echo "KVM: no (TCG)"
           fi
           sudo cp "/boot/vmlinuz-$(uname -r)" /tmp/vmlinuz && sudo chmod 644 /tmp/vmlinuz
+          if file /tmp/vmlinuz | grep -q gzip; then zcat /tmp/vmlinuz > /tmp/Image && mv /tmp/Image /tmp/vmlinuz; fi
           file /tmp/vmlinuz
-          # Arm64 vmlinuz may be gzip; QEMU loads raw Image most reliably
-          if [ "$(uname -m)" = "aarch64" ] && file /tmp/vmlinuz | grep -q gzip; then
-            zcat /tmp/vmlinuz > /tmp/Image && mv /tmp/Image /tmp/vmlinuz
-          fi
-          timeout 240 "${qemu[@]}" -smp 2 -nographic -no-reboot \
-            -kernel /tmp/vmlinuz \
-            -append "console=$con panic=-1 lsm=landlock,lockdown,yama,integrity,apparmor,bpf" \
+          # Minimal initramfs: mount securityfs, print the active LSM list, power off
+          mkdir -p /tmp/ir/bin && cp /bin/busybox /tmp/ir/bin/busybox
+          printf '%s\n' '#!/bin/busybox sh' \
+            '/bin/busybox mkdir -p /sys /proc' \
+            '/bin/busybox mount -t sysfs sysfs /sys' \
+            '/bin/busybox mount -t securityfs securityfs /sys/kernel/security' \
+            'echo "ACTIVE_LSM=$(/bin/busybox cat /sys/kernel/security/lsm)"' \
+            '/bin/busybox poweroff -f' > /tmp/ir/init
+          chmod +x /tmp/ir/init
+          (cd /tmp/ir && find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.gz)
+          timeout 900 "${qemu[@]}" -smp 2 -nographic -no-reboot \
+            -kernel /tmp/vmlinuz -initrd /tmp/initrd.gz \
+            -append "$con panic=-1 rdinit=/init lsm=landlock,lockdown,yama,integrity,apparmor,bpf" \
             > /tmp/boot.log 2>&1 || true
-          echo "--- LSM lines from guest boot"
-          grep -aE 'LSM|apparmor|AppArmor|landlock|Landlock|Yama|bpf' /tmp/boot.log | grep -aiE 'lsm|initializ|enabled|active' | head -20
-          grep -aq 'LSM: initializing lsm=.*bpf' /tmp/boot.log
-          grep -aq 'LSM: initializing lsm=.*apparmor' /tmp/boot.log
-          grep -aiq 'LSM support for eBPF active' /tmp/boot.log
-          echo "OK: guest kernel initialized apparmor and bpf LSMs"
+          grep -a -E 'LSM|eBPF' /tmp/boot.log | head -10
+          line=$(grep -a '^ACTIVE_LSM=' /tmp/boot.log | tr -d '\r')
+          echo "$line"
+          [[ ",${line#ACTIVE_LSM=}," == *",bpf,"* ]]
+          [[ ",${line#ACTIVE_LSM=}," == *",apparmor,"* ]]
+          echo "OK: guest kernel has apparmor and bpf active"
 
       - name: Boot log tail on failure
         if: failure()
