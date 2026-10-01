@@ -67,8 +67,7 @@ jobs:
             for v in v0.40.7 v0.40.8; do
               echo "=== [$u] installer $v ==="
               $U "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | bash >/dev/null 2>&1; echo installer-exit=\$?"
-              $U 'cd ~/.nvm && echo "HEAD=$(git describe --tags) status-lines=$(git status --short | wc -l) test-dir=$(test -d test && echo yes || echo no)"; ls alias alias/lts 2>&1 | tr "
-" " "; echo'
+              $U 'cd ~/.nvm && echo "HEAD=$(git describe --tags) status-lines=$(git status --short | wc -l) test-dir=$(test -d test && echo yes || echo no)"; echo "aliases: $(ls alias alias/lts 2>&1 | paste -sd " ")"'
               $U 'source ~/.nvm/nvm.sh; echo "nvm=$(nvm --version)"; nvm use --lts >/dev/null 2>&1; echo use-lts-exit=$?; nvm use 24 >/dev/null 2>&1 && echo "use-24 node=$(node -v)"' || rc=1
             done
           done
