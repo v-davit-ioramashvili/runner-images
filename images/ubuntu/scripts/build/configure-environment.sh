@@ -85,6 +85,12 @@ fi
 grub_dropin='/etc/default/grub.d/99-runner-performance.cfg'
 mkdir -p "$(dirname "$grub_dropin")"
 echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT rootflags=nobarrier,data=writeback,journal_async_commit,commit=30"' | tee "$grub_dropin"
+
+# https://github.com/actions/runner-images/issues/14783
+# The Azure kernels are built with CONFIG_BPF_LSM=y, but bpf is not in the default CONFIG_LSM list.
+# lsm= replaces that list, so it keeps the defaults and appends bpf.
+lsm_dropin='/etc/default/grub.d/99-runner-lsm.cfg'
+echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT lsm=landlock,lockdown,yama,integrity,apparmor,bpf"' | tee "$lsm_dropin"
 update-grub
 
 # Create symlink for tests running

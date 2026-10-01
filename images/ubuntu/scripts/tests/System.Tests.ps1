@@ -75,6 +75,20 @@ Describe "Root filesystem performance options" {
     }
 }
 
+# https://github.com/actions/runner-images/issues/14783
+Describe "BPF LSM" {
+    It "GRUB drop-in sets the LSM list" {
+        $content = Get-Content "/etc/default/grub.d/99-runner-lsm.cfg" -Raw
+        $content | Should -Match "lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
+    }
+
+    It "BPF and AppArmor are active LSMs" {
+        $activeLsms = (Get-Content "/sys/kernel/security/lsm" -Raw).Trim() -split ","
+        $activeLsms | Should -Contain "bpf"
+        $activeLsms | Should -Contain "apparmor"
+    }
+}
+
 Describe "Dpkg options" {
     It "Package unpacking is configured with --force-unsafe-io" {
         $dpkgOptions = (apt-config dump "Dpkg::Options") -join "`n"
