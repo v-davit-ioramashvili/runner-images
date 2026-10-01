@@ -25,7 +25,9 @@ jobs:
           sudo update-grub 2>&1 | tail -5
           echo "--- default entry"
           sudo grep -m1 -E '^\s*linux\s' /boot/grub/grub.cfg
-          sudo grep -m1 -E '^\s*linux\s' /boot/grub/grub.cfg | grep -q 'rootflags=nobarrier.* lsm=landlock,lockdown,yama,integrity,apparmor,bpf'
+          entry=$(sudo grep -m1 -E '^\s*linux\s' /boot/grub/grub.cfg)
+          grep -q 'rootflags=nobarrier,data=writeback,journal_async_commit,commit=30' <<< "$entry"
+          grep -q 'lsm=landlock,lockdown,yama,integrity,apparmor,bpf' <<< "$entry"
           echo "OK: default entry carries both rootflags and lsm="
 
       - name: Boot runner kernel in QEMU with the new lsm=
