@@ -45,8 +45,8 @@ jobs:
           else
             qemu+=(-cpu max); echo "KVM: no (TCG)"
           fi
-          sudo cp "/boot/vmlinuz-$(uname -r)" /tmp/vmlinuz && sudo chmod 644 /tmp/vmlinuz
-          if file /tmp/vmlinuz | grep -q gzip; then zcat /tmp/vmlinuz > /tmp/Image && mv /tmp/Image /tmp/vmlinuz; fi
+          sudo cat "/boot/vmlinuz-$(uname -r)" > /tmp/vmlinuz.orig
+          if file /tmp/vmlinuz.orig | grep -q gzip; then zcat /tmp/vmlinuz.orig > /tmp/vmlinuz; else cp /tmp/vmlinuz.orig /tmp/vmlinuz; fi
           file /tmp/vmlinuz
           # Minimal initramfs: mount securityfs, print the active LSM list, power off
           mkdir -p /tmp/ir/bin && cp /bin/busybox /tmp/ir/bin/busybox
