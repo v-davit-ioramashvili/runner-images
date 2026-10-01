@@ -1,0 +1,65 @@
+# TEMPORARY - validation aid for #14783. Not part of the PR.
+# 1) applies the drop-in exactly as configure-environment.sh does and checks grub.cfg
+# 2) boots the runner's own kernel in QEMU with that lsm= value and reads the LSM init line
+name: Validate BPF LSM boot 14783
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/bpf-lsm-14783-boot*'
+
+jobs:
+  boot:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Apply drop-in and regenerate grub.cfg
+        run: |
+          lsm_dropin='/etc/default/grub.d/99-runner-lsm.cfg'
+          echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT lsm=landlock,lockdown,yama,integrity,apparmor,bpf"' | sudo tee "$lsm_dropin"
+          sudo update-grub 2>&1 | tail -5
+          echo "--- default entry"
+          sudo grep -m1 -E '^\s*linux\s' /boot/grub/grub.cfg
+          sudo grep -m1 -E '^\s*linux\s' /boot/grub/grub.cfg | grep -q 'rootflags=nobarrier.* lsm=landlock,lockdown,yama,integrity,apparmor,bpf'
+          echo "OK: default entry carries both rootflags and lsm="
+
+      - name: Boot runner kernel in QEMU with the new lsm=
+        run: |
+          sudo apt-get -qq update >/dev/null
+          if [ "$(uname -m)" = "x86_64" ]; then
+            sudo apt-get -qq install -y qemu-system-x86 >/dev/null
+            qemu=(qemu-system-x86_64 -M q35 -m 2048) ; con=ttyS0
+          else
+            sudo apt-get -qq install -y qemu-system-arm qemu-efi-aarch64 >/dev/null
+            qemu=(qemu-system-aarch64 -M virt -m 2048) ; con=ttyAMA0
+          fi
+          if [ -w /dev/kvm ] || sudo chmod 666 /dev/kvm 2>/dev/null; then
+            qemu+=(-enable-kvm -cpu host); echo "KVM: yes"
+          else
+            qemu+=(-cpu max); echo "KVM: no (TCG)"
+          fi
+          sudo cp "/boot/vmlinuz-$(uname -r)" /tmp/vmlinuz && sudo chmod 644 /tmp/vmlinuz
+          file /tmp/vmlinuz
+          # Arm64 vmlinuz may be gzip; QEMU loads raw Image most reliably
+          if [ "$(uname -m)" = "aarch64" ] && file /tmp/vmlinuz | grep -q gzip; then
+            zcat /tmp/vmlinuz > /tmp/Image && mv /tmp/Image /tmp/vmlinuz
+          fi
+          timeout 240 "${qemu[@]}" -smp 2 -nographic -no-reboot \
+            -kernel /tmp/vmlinuz \
+            -append "console=$con panic=-1 lsm=landlock,lockdown,yama,integrity,apparmor,bpf" \
+            > /tmp/boot.log 2>&1 || true
+          echo "--- LSM lines from guest boot"
+          grep -aE 'LSM|apparmor|AppArmor|landlock|Landlock|Yama|bpf' /tmp/boot.log | grep -aiE 'lsm|initializ|enabled|active' | head -20
+          grep -aq 'LSM: initializing lsm=.*bpf' /tmp/boot.log
+          grep -aq 'LSM: initializing lsm=.*apparmor' /tmp/boot.log
+          grep -aiq 'LSM support for eBPF active' /tmp/boot.log
+          echo "OK: guest kernel initialized apparmor and bpf LSMs"
+
+      - name: Boot log tail on failure
+        if: failure()
+        run: tail -60 /tmp/boot.log || true
