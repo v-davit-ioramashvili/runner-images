@@ -1,0 +1,217 @@
+# TEMPORARY - validation aid for #14822.
+# Watches CompatTelRunner.exe on every Windows image for N minutes after the job starts and
+# records WHO launches it (parent process, services hosted in the parent svchost, the
+# scheduled task that spawned it) and its command line (-m:<module>), plus how much CPU it
+# burns. The image already disables the "Application Experience" task folder and DiagTrack,
+# so this pins down which remaining component (InventorySvc, PcaSvc, a task elsewhere, ...)
+# still starts it, before anything is added to Configure-System.ps1.
+# Delete this file before opening the PR.
+
+name: Validate CompatTelRunner (#14822)
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'How long to watch, in minutes'
+        default: '25'
+  push:
+    branches:
+      - 'validate/compattelrunner-14822*'
+
+jobs:
+  watch:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-2022
+          - windows-2025
+          - windows-2025-vs2026
+          - windows-11-arm
+          - windows-11-vs2026-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    env:
+      WATCH_MINUTES: ${{ inputs.minutes || '25' }}
+
+    steps:
+      - name: Baseline - image, uptime, services, policies, tasks
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'ctr'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          "OUT_DIR=$out" | Add-Content $env:GITHUB_ENV
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          Write-Host "OS=$($os.Caption) $($os.Version) Arch=$($os.OSArchitecture) Cores=$([Environment]::ProcessorCount)"
+          Write-Host "Boot=$($os.LastBootUpTime) Uptime=$([math]::Round(((Get-Date) - $os.LastBootUpTime).TotalMinutes, 1)) min"
+
+          Write-Host "`n=== CompatTelRunner already running at job start?"
+          Get-CimInstance Win32_Process -Filter "Name='CompatTelRunner.exe'" |
+            Format-Table ProcessId, ParentProcessId, CreationDate, CommandLine -AutoSize -Wrap | Out-String -Width 400 | Write-Host
+
+          Write-Host "=== Services"
+          'InventorySvc', 'PcaSvc', 'DiagTrack', 'dmwappushservice', 'StorSvc', 'DPS', 'WerSvc', 'SysMain' |
+            ForEach-Object { Get-Service $_ -ErrorAction SilentlyContinue } |
+            Format-Table Name, Status, StartType -AutoSize | Out-String | Write-Host
+
+          Write-Host "=== Policies"
+          'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat',
+          'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection',
+          'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' | ForEach-Object {
+            Write-Host "[$_]"
+            if (Test-Path $_) {
+              (Get-ItemProperty $_).PSObject.Properties | Where-Object Name -notlike 'PS*' |
+                ForEach-Object { Write-Host "  $($_.Name) = $($_.Value)" }
+            } else { Write-Host '  (missing)' }
+          }
+
+          Write-Host "`n=== Scheduled tasks that can start CompatTelRunner / telemetry modules"
+          Get-ScheduledTask | Where-Object {
+            $_.TaskPath -like '*Application Experience*' -or
+            ($_.Actions | Where-Object { "$($_.Execute) $($_.Arguments) $($_.ClassId)" -match 'CompatTel|appraiser|invagent|devinv|aeinv|pcasvc' })
+          } | ForEach-Object {
+            $a = ($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments) $($_.ClassId)".Trim() }) -join ' | '
+            Write-Host ("{0,-9} {1}{2}  ->  {3}" -f $_.State, $_.TaskPath, $_.TaskName, $a)
+          }
+
+          # Catch short-lived launches too: process-creation auditing with command line,
+          # and the Task Scheduler operational log (event 129 gives task name + PID).
+          auditpol /set /subcategory:"Process Creation" /success:enable | Out-Null
+          New-Item -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit' -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
+          wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+
+      - name: Watch CompatTelRunner for ${{ env.WATCH_MINUTES }} minutes
+        shell: pwsh
+        run: |
+          $cores    = [Environment]::ProcessorCount
+          $boot     = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+          $deadline = (Get-Date).AddMinutes([int]$env:WATCH_MINUTES)
+          $seen     = @{}
+          $prevCpu  = @{}
+          $prevTime = Get-Date
+          $lastBeat = Get-Date '2000-01-01'
+          $csv      = Join-Path $env:OUT_DIR 'samples.csv'
+          'Time,UptimeMin,CtrProcs,CtrPctOfMachine,CtrPctOfOneCore,MachinePct' | Set-Content $csv
+
+          while ((Get-Date) -lt $deadline) {
+            $now     = Get-Date
+            $elapsed = ($now - $prevTime).TotalSeconds
+            $uptime  = [math]::Round(($now - $boot).TotalMinutes, 1)
+
+            foreach ($p in Get-CimInstance Win32_Process -Filter "Name='CompatTelRunner.exe'") {
+              if (-not $seen.Contains([int]$p.ProcessId)) {
+                $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)"
+                $svcs   = (Get-CimInstance Win32_Service -Filter "ProcessId=$($p.ParentProcessId)").Name -join ','
+                $seen[[int]$p.ProcessId] = [pscustomobject]@{
+                  PID            = $p.ProcessId
+                  FirstSeen      = $now.ToString('HH:mm:ss')
+                  UptimeMin      = $uptime
+                  ParentPID      = $p.ParentProcessId
+                  ParentName     = $parent.Name
+                  ParentServices = $svcs
+                  ParentCmd      = $parent.CommandLine
+                  CommandLine    = $p.CommandLine
+                  CpuSec         = 0
+                }
+                Write-Host "::warning::NEW CompatTelRunner PID=$($p.ProcessId) uptime=${uptime}m parent=$($parent.Name)($($p.ParentProcessId)) services=[$svcs] cmd=$($p.CommandLine)"
+              }
+            }
+
+            $delta = 0.0
+            $live  = @(Get-Process -Name CompatTelRunner -ErrorAction SilentlyContinue)
+            foreach ($gp in $live) {
+              $cpu = $gp.TotalProcessorTime.TotalSeconds
+              if ($prevCpu.ContainsKey($gp.Id)) { $delta += $cpu - $prevCpu[$gp.Id] }
+              $prevCpu[$gp.Id] = $cpu
+              if ($seen.Contains($gp.Id)) { $seen[$gp.Id].CpuSec = [math]::Round($cpu, 1) }
+            }
+            $machine = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
+            $pctOne  = if ($elapsed -gt 0) { [math]::Round(100 * $delta / $elapsed, 1) } else { 0 }
+            $pctAll  = [math]::Round($pctOne / $cores, 1)
+            "$($now.ToString('HH:mm:ss')),$uptime,$($live.Count),$pctAll,$pctOne,$machine" | Add-Content $csv
+
+            if ($live.Count -gt 0 -or ($now - $lastBeat).TotalSeconds -ge 60) {
+              Write-Host ("{0} up={1,5}m ctr={2} ctrCPU={3,5}% of machine ({4,5}% of one core) machineCPU={5}%" -f $now.ToString('HH:mm:ss'), $uptime, $live.Count, $pctAll, $pctOne, $machine)
+              $lastBeat = $now
+            }
+            $prevTime = $now
+            Start-Sleep -Seconds 2
+          }
+
+          $seen.Values | Sort-Object FirstSeen | Export-Clixml (Join-Path $env:OUT_DIR 'seen.xml')
+          $seen.Values | Sort-Object FirstSeen | Format-List | Out-String -Width 400 | Write-Host
+
+      - name: Post-mortem - audit log, Task Scheduler log, summary
+        if: always()
+        shell: pwsh
+        run: |
+          $seenFile = Join-Path $env:OUT_DIR 'seen.xml'
+          $seen = if (Test-Path $seenFile) { @(Import-Clixml $seenFile) } else { @() }
+
+          function Get-EventData($e) {
+            $h = @{}
+            ([xml]$e.ToXml()).Event.EventData.Data | ForEach-Object { $h[$_.Name] = $_.'#text' }
+            $h
+          }
+
+          Write-Host "=== Security 4688: CompatTelRunner launches (includes short-lived ones)"
+          $launches = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688 } -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $d = Get-EventData $_
+              if ($d.NewProcessName -like '*CompatTelRunner.exe') {
+                [pscustomobject]@{
+                  Time       = $_.TimeCreated.ToString('HH:mm:ss')
+                  PID        = [Convert]::ToInt32($d.NewProcessId, 16)
+                  ParentPID  = [Convert]::ToInt32($d.ProcessId, 16)
+                  Parent     = $d.ParentProcessName
+                  CommandLine = $d.CommandLine
+                }
+              }
+            } | Sort-Object Time)
+          $launches | Format-Table -AutoSize -Wrap | Out-String -Width 400 | Write-Host
+
+          Write-Host "=== Task Scheduler 129: tasks that launched a process during the watch"
+          $taskLaunches = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 129 } -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $d = Get-EventData $_
+              [pscustomobject]@{ Time = $_.TimeCreated.ToString('HH:mm:ss'); PID = [int]$d.ProcessID; Task = $d.TaskName; Path = $d.Path }
+            } | Sort-Object Time)
+          $taskLaunches | Format-Table -AutoSize -Wrap | Out-String -Width 400 | Write-Host
+
+          $allPids = @(@($seen.PID) + @($launches.PID) | Where-Object { $_ } | Sort-Object -Unique)
+          $byTask  = @{}; $taskLaunches | ForEach-Object { $byTask[$_.PID] = $_.Task }
+          $byAudit = @{}; $launches | ForEach-Object { $byAudit[$_.PID] = $_ }
+          $byPoll  = @{}; $seen | ForEach-Object { $byPoll[[int]$_.PID] = $_ }
+
+          $md = @("## $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)", '')
+          if ($allPids.Count -eq 0) {
+            $md += "No CompatTelRunner.exe launches in $env:WATCH_MINUTES minutes."
+          } else {
+            $md += '| PID | First seen (uptime min) | Parent | Parent services | Scheduled task | CPU s | Command line |'
+            $md += '|---|---|---|---|---|---|---|'
+            foreach ($id in $allPids) {
+              $p = $byPoll[[int]$id]; $a = $byAudit[[int]$id]
+              $parent = if ($p) { "$($p.ParentName) ($($p.ParentPID))" } else { "$($a.Parent) ($($a.ParentPID))" }
+              $cmd    = if ($p.CommandLine) { $p.CommandLine } else { $a.CommandLine }
+              $first  = if ($p) { "$($p.FirstSeen) ($($p.UptimeMin))" } else { "$($a.Time) (audit only, short-lived)" }
+              $md += "| $id | $first | $parent | $($p.ParentServices) | $($byTask[[int]$id]) | $($p.CpuSec) | ``$cmd`` |"
+            }
+            $total = ($seen | Measure-Object CpuSec -Sum).Sum
+            $md += '', "Total CompatTelRunner CPU: **$([math]::Round($total,1)) s** across $($allPids.Count) process(es), $([Environment]::ProcessorCount) cores."
+          }
+          $md -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+          $md -join "`n" | Write-Host
+
+          $launches     | Export-Csv (Join-Path $env:OUT_DIR 'audit-4688.csv') -NoTypeInformation
+          $taskLaunches | Export-Csv (Join-Path $env:OUT_DIR 'task-129.csv') -NoTypeInformation
+
+      - name: Upload raw data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr-${{ matrix.os }}
+          path: ${{ env.OUT_DIR }}
