@@ -5,6 +5,9 @@
 # burns. The image already disables the "Application Experience" task folder and DiagTrack,
 # so this pins down which remaining component (InventorySvc, PcaSvc, a task elsewhere, ...)
 # still starts it, before anything is added to Configure-System.ps1.
+# Run 2 (mitigation): only the Server 2025 labels, which reproduced it in run 1 (all launches
+# came from InventorySvc). Applies the proposed Configure-System.ps1 change at job start -
+# disable InventorySvc + AppCompat DisableInventory=1 - and checks the launches stop.
 # Delete this file before opening the PR.
 
 name: Validate CompatTelRunner (#14822)
@@ -25,11 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - windows-2022
           - windows-2025
           - windows-2025-vs2026
-          - windows-11-arm
-          - windows-11-vs2026-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
@@ -37,6 +37,33 @@ jobs:
       WATCH_MINUTES: ${{ inputs.minutes || '25' }}
 
     steps:
+      - name: Mitigation - disable InventorySvc + DisableInventory policy
+        shell: pwsh
+        run: |
+          $svc = Get-Service InventorySvc -ErrorAction SilentlyContinue
+          if (-not $svc) { Write-Host '::warning::InventorySvc not present'; exit 0 }
+          Write-Host "Before: $($svc.Status) / $($svc.StartType)"
+
+          # Same pattern as Configure-System.ps1 ($servicesToDisable); record whether it is allowed.
+          try {
+            Stop-Service InventorySvc -Force -ErrorAction Stop
+            (Get-Service InventorySvc).WaitForStatus('Stopped', '00:01:00')
+            Set-Service InventorySvc -StartupType Disabled -ErrorAction Stop
+            Write-Host 'Set-Service path: OK'
+          } catch {
+            Write-Host "::warning::Set-Service path failed: $($_.Exception.Message) - falling back to registry Start=4"
+            Set-ItemProperty -Path HKLM:\System\CurrentControlSet\Services\InventorySvc -Name Start -Value 4 -Force
+            Stop-Service InventorySvc -Force -ErrorAction Continue
+          }
+
+          New-Item -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat -Force | Out-Null
+          Set-ItemProperty -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat -Name DisableInventory -Value 1 -Type DWord
+
+          $svc = Get-Service InventorySvc
+          Write-Host "After:  $($svc.Status) / $($svc.StartType)"
+          Write-Host "Registry Start = $((Get-ItemProperty HKLM:\System\CurrentControlSet\Services\InventorySvc).Start)"
+          Get-CimInstance Win32_Process -Filter "Name='CompatTelRunner.exe'" | ForEach-Object { Write-Host "::warning::CompatTelRunner already running: $($_.ProcessId) $($_.CommandLine)" }
+
       - name: Baseline - image, uptime, services, policies, tasks
         shell: pwsh
         run: |
@@ -149,6 +176,8 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $svc = Get-Service InventorySvc -ErrorAction SilentlyContinue
+          Write-Host "InventorySvc at end of watch: $($svc.Status) / $($svc.StartType)"
           $seenFile = Join-Path $env:OUT_DIR 'seen.xml'
           $seen = if (Test-Path $seenFile) { @(Import-Clixml $seenFile) } else { @() }
 
@@ -187,7 +216,7 @@ jobs:
           $byAudit = @{}; $launches | ForEach-Object { $byAudit[$_.PID] = $_ }
           $byPoll  = @{}; $seen | ForEach-Object { $byPoll[[int]$_.PID] = $_ }
 
-          $md = @("## $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)", '')
+          $md = @("## $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH) - mitigated", '', "InventorySvc at end: $($svc.Status) / $($svc.StartType)", '')
           if ($allPids.Count -eq 0) {
             $md += "No CompatTelRunner.exe launches in $env:WATCH_MINUTES minutes."
           } else {
