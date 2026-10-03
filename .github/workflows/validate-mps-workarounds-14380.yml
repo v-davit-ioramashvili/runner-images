@@ -1,0 +1,98 @@
+name: Validate MPS workarounds (macos-15 pin / force CPU) - issue 14380
+
+# Proves the two workarounds we plan to give the reporter of #14380 actually work,
+# end to end, applied exactly as they would apply them:
+#
+#   pin-macos15 : their UNCHANGED device-selection code (which auto-picks mps) on
+#                 macos-15 -> should run on MPS and produce masks, not crash.
+#   force-cpu   : the CI-gating pattern we recommend (force cpu when CI is set) on
+#                 macos-26 -> should select cpu and produce masks.
+#
+# Each job exits non-zero (job goes red) if the workaround yields zero masks, so a
+# green run is a real pass, not just "the script ran".
+
+on:
+  workflow_dispatch:
+
+jobs:
+  workaround:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, mode: pin-macos15 }
+          - { os: macos-26, mode: force-cpu }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install SAM2 stack (torch 2.12.1, the reporter's version)
+        run: |
+          python -m pip install --quiet "torch==2.12.1" torchvision numpy opencv-python-headless huggingface_hub
+          python -m pip install --quiet "git+https://github.com/facebookresearch/sam2@2b90b9f5ceec907a1c18123530e92e794ad901a4"
+
+      - name: Validate workaround (${{ matrix.mode }})
+        env:
+          CI: "true"
+          MODE: ${{ matrix.mode }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          cat > validate.py <<'PY'
+          import os, sys
+          import numpy as np
+          import cv2
+          import torch
+          from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+
+          mask_settings = {
+              "points_per_side": 4, "points_per_batch": 4,
+              "pred_iou_thresh": 0.80, "stability_score_thresh": 0.80,
+              "stability_score_offset": 0.1, "crop_n_layers": 1,
+              "box_nms_thresh": 0.1, "crop_n_points_downscale_factor": 1,
+              "min_mask_region_area": 5, "use_m2m": True,
+          }
+
+          def auto_select():
+              # the reporter's exact device-selection block
+              return (
+                  "cuda" if torch.cuda.is_available()
+                  else "mps" if torch.backends.mps.is_available()
+                  else "cpu"
+              )
+
+          mode = os.environ.get("MODE")
+          if mode == "force-cpu":
+              # recommended CI gate: force CPU regardless of mps availability
+              device = "cpu" if os.environ.get("CI") else auto_select()
+          else:
+              # pin-macos15: reporter's code UNCHANGED
+              device = auto_select()
+
+          print(f"os={os.environ.get('MATRIX_OS')} mode={mode} "
+                f"mps_available={torch.backends.mps.is_available()} selected_device={device}")
+
+          img = np.zeros((100, 100, 3), np.uint8)
+          white, filled = (255, 255, 255), -1
+          cv2.circle(img, (30, 30), 10, white, filled)
+          cv2.circle(img, (70, 65), 15, white, filled)
+
+          model = SAM2AutomaticMaskGenerator.from_pretrained(
+              "facebook/sam2.1-hiera-tiny", device=device,
+              apply_postprocessing=False, **mask_settings,
+          )
+          masks = model.generate(img)
+          n = len(masks)
+          area = int(np.sum([m["area"] for m in masks])) if n else 0
+          print(f"RESULT num_masks={n} total_area={area}")
+
+          if n > 0:
+              print("WORKAROUND OK")
+          else:
+              print("WORKAROUND FAILED: zero masks")
+              sys.exit(1)
+          PY
+          python validate.py
