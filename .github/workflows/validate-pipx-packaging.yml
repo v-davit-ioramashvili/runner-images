@@ -1,0 +1,117 @@
+# TEMPORARY - validation aid for the ubuntu-26.04 pipx install failure.
+# pipx 1.17.11 (2026-10-03) raised its requirement to packaging>=26.3. Ubuntu
+# ships packaging from apt (python3-packaging, 26.0 on 26.04), which has no pip
+# RECORD file, so `python3 -m pip install pipx` in install-python.sh tries to
+# upgrade it and dies with `uninstall-no-record-file`.
+#
+# This workflow resets the runner to the state the image build sees (apt
+# packaging only, no pip-installed pipx/packaging under /usr/local), then:
+#   1. reproduces the failure with the current install-python.sh command
+#   2. applies the proposed fix (`pip install --ignore-installed packaging`
+#      before installing pipx) and proves pipx works and the apt files are intact
+# 22.04/24.04 are included to see whether the older images are affected too.
+# Delete this file before opening the PR.
+
+name: Validate pipx packaging fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/pipx-packaging*'
+
+jobs:
+  pipx:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+          - ubuntu-24.04
+          - ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    env:
+      # mirror the image build: root pip, /etc/pip.conf break-system-packages
+      SPIP: sudo env PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip
+
+    steps:
+      - name: Write the reset helper
+        run: |
+          cat > "$RUNNER_TEMP/reset.sh" <<'EOF'
+          # Remove pip-installed copies under /usr/local so only the apt packaging
+          # remains - the same state the packer build has when install-python.sh runs.
+          for _ in 1 2 3; do
+            for p in pipx packaging argcomplete userpath platformdirs filelock; do
+              loc=$(sudo python3 -m pip show "$p" 2>/dev/null | awk '/^Location:/{print $2}')
+              case "$loc" in
+                /usr/local/*) $SPIP uninstall -y "$p" >/dev/null ;;
+              esac
+            done
+          done
+          sudo apt-get install -y --reinstall --no-install-recommends python3-packaging >/dev/null
+          echo "packaging now resolves to:"
+          sudo python3 -c "import packaging; print(' ', packaging.__version__, packaging.__file__)"
+          echo "pipx on PATH after reset: $(command -v pipx || echo none)"
+          EOF
+
+      - name: Baseline
+        run: |
+          sudo apt-get update -qq
+          . /etc/os-release; echo "OS: $PRETTY_NAME ($(uname -m))"
+          python3 --version
+          $SPIP --version
+          dpkg-query -W -f='${Package} ${Version}\n' python3-packaging python3-pip 2>/dev/null || true
+          echo "--- latest pipx on PyPI and its packaging requirement ---"
+          curl -s https://pypi.org/pypi/pipx/json | python3 -c "import json,sys; i=json.load(sys.stdin)['info']; print(i['version'], [r for r in i['requires_dist'] if r.startswith('packaging')])"
+
+      - name: Reproduce - current install-python.sh command
+        run: |
+          . "$RUNNER_TEMP/reset.sh"
+          set +e
+          $SPIP install pipx 2>&1 | tee "$RUNNER_TEMP/repro.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if grep -q 'uninstall-no-record-file' "$RUNNER_TEMP/repro.log"; then
+            result="FAILS with uninstall-no-record-file (rc=$rc)"
+          elif [ "$rc" -ne 0 ]; then
+            result="FAILS for another reason (rc=$rc)"
+          else
+            result="succeeds (rc=0)"
+          fi
+          echo "### ${{ matrix.runner }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- current command: $result" >> "$GITHUB_STEP_SUMMARY"
+          echo "RESULT: $result"
+
+      - name: Apply the fix - option 1
+        run: |
+          . "$RUNNER_TEMP/reset.sh"
+          set -e
+          # proposed install-python.sh change
+          $SPIP install --ignore-installed packaging
+          $SPIP install pipx
+          echo "- fixed command: installs OK" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify pipx works and apt files are untouched
+        run: |
+          set -e
+          echo "--- packaging resolution for root python ---"
+          sudo python3 -c "import packaging; print(packaging.__version__, packaging.__file__)"
+          sudo python3 -c "import packaging, sys; from packaging.version import Version as V; sys.exit(0 if V(packaging.__version__) >= V('26.3') else 1)"
+
+          echo "--- apt python3-packaging integrity (no output = intact) ---"
+          sudo dpkg -V python3-packaging
+          dpkg-query -W -f='${Package} ${Version} ${db:Status-Status}\n' python3-packaging
+
+          echo "--- pipx itself ---"
+          sudo python3 -m pipx --version
+          pipx_ver=$(sudo python3 -m pipx --version)
+
+          echo "--- pipx install of a toolset package into a fresh home (like install-pipx-packages.sh) ---"
+          export PIPX_HOME="$RUNNER_TEMP/pipx" PIPX_BIN_DIR="$RUNNER_TEMP/pipx_bin"
+          sudo env PIPX_HOME="$PIPX_HOME" PIPX_BIN_DIR="$PIPX_BIN_DIR" python3 -m pipx install yamllint
+          "$PIPX_BIN_DIR/yamllint" --version
+
+          echo "- verify: pipx $pipx_ver, packaging $(sudo python3 -c 'import packaging; print(packaging.__version__)') from /usr/local, apt files intact, yamllint via pipx OK" >> "$GITHUB_STEP_SUMMARY"
