@@ -115,3 +115,59 @@ jobs:
           "$PIPX_BIN_DIR/yamllint" --version
 
           echo "- verify: pipx $pipx_ver, packaging $(sudo python3 -c 'import packaging; print(packaging.__version__)') from /usr/local, apt files intact, yamllint via pipx OK" >> "$GITHUB_STEP_SUMMARY"
+
+  # Same approach as the existing Ubuntu 24.04 pin (#14654): pin pipx to the last
+  # release that accepts the distro packaging, so pip never touches dpkg files.
+  pipx-pin-2604:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    env:
+      SPIP: sudo env PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip
+
+    steps:
+      - name: Reset to the image-build state
+        run: |
+          sudo apt-get update -qq
+          for _ in 1 2 3; do
+            for p in pipx packaging argcomplete userpath platformdirs filelock; do
+              loc=$(sudo python3 -m pip show "$p" 2>/dev/null | awk '/^Location:/{print $2}')
+              case "$loc" in
+                /usr/local/*) $SPIP uninstall -y "$p" >/dev/null ;;
+              esac
+            done
+          done
+          sudo apt-get install -y --reinstall --no-install-recommends python3-packaging >/dev/null
+          sudo python3 -c "import packaging; print(packaging.__version__, packaging.__file__)"
+
+      - name: Install pinned pipx (proposed install-python.sh change)
+        run: |
+          set -e
+          $SPIP install "pipx==1.17.10" 2>&1 | tee "$RUNNER_TEMP/pin.log"
+          if grep -q 'Attempting uninstall: packaging' "$RUNNER_TEMP/pin.log"; then
+            echo "pip tried to replace the apt packaging"; exit 1
+          fi
+
+      - name: Verify
+        run: |
+          set -e
+          echo "--- packaging must still be the apt copy ---"
+          loc=$(sudo python3 -c "import packaging; print(packaging.__file__)")
+          echo "$loc"
+          case "$loc" in /usr/lib/python3/dist-packages/*) ;; *) echo "packaging not from apt"; exit 1 ;; esac
+          sudo dpkg -V python3-packaging
+          pipx_ver=$(sudo python3 -m pipx --version); echo "pipx $pipx_ver"
+          [ "$pipx_ver" = "1.17.10" ]
+          export PIPX_HOME="$RUNNER_TEMP/pipx" PIPX_BIN_DIR="$RUNNER_TEMP/pipx_bin"
+          sudo env PIPX_HOME="$PIPX_HOME" PIPX_BIN_DIR="$PIPX_BIN_DIR" python3 -m pipx install yamllint
+          sudo env PIPX_HOME="$PIPX_HOME" PIPX_BIN_DIR="$PIPX_BIN_DIR" python3 -m pipx install ansible-core
+          sudo env PIPX_HOME="$PIPX_HOME" PIPX_BIN_DIR="$PIPX_BIN_DIR" python3 -m pipx inject ansible-core ansible
+          "$PIPX_BIN_DIR/yamllint" --version
+          "$PIPX_BIN_DIR/ansible" --version | head -1
+          echo "### ${{ matrix.runner }} pin: pipx $pipx_ver, packaging from apt, toolset pipx packages OK" >> "$GITHUB_STEP_SUMMARY"
