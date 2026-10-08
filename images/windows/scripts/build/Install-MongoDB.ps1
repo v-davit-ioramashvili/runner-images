@@ -41,12 +41,17 @@ Stop-Service $mongodbService
 $mongodbService | Set-Service -StartupType Disabled
 
 # Install mongodb shell for mongodb
-$mongoshVersion = (Get-GithubReleasesByVersion -Repo "mongodb-js/mongosh" -Version "latest").version
+# Query only the latest release: mongosh releases carry ~50 assets each, so paging through
+# all of them takes minutes and api.github.com intermittently answers with 504
+$mongoshRelease = Invoke-ScriptBlockWithRetry -RetryCount 5 -RetryIntervalSeconds 15 -Command {
+    Invoke-RestMethod -Uri "https://api.github.com/repos/mongodb-js/mongosh/releases/latest"
+}
 
-$mongoshDownloadUrl = Resolve-GithubReleaseAssetUrl `
-    -Repo "mongodb-js/mongosh" `
-    -Version $mongoshVersion `
-    -UrlMatchPattern "mongosh-*-x64.msi"
+$mongoshDownloadUrl = ([string[]] $mongoshRelease.assets.browser_download_url) -like "*/mongosh-*-x64.msi"
+if ($mongoshDownloadUrl.Count -ne 1) {
+    throw "Expected one mongosh x64 MSI in release $($mongoshRelease.tag_name), found $($mongoshDownloadUrl.Count)"
+}
+Write-Host "Found download url for mongosh $($mongoshRelease.tag_name): $mongoshDownloadUrl"
 
 Install-Binary -Type MSI `
     -Url $mongoshDownloadUrl `

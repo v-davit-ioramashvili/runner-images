@@ -669,7 +669,10 @@ function Get-GithubReleasesByVersion {
         $page = 1
         $pageSize = 100
         do {
-            $releasesPage = Invoke-RestMethod -Uri "https://api.github.com/repos/${Repository}/releases?per_page=${pageSize}&page=${page}"
+            # api.github.com can return 5xx on large release pages or 403 when rate limited
+            $releasesPage = Invoke-ScriptBlockWithRetry -RetryCount 5 -RetryIntervalSeconds 15 -Command {
+                Invoke-RestMethod -Uri "https://api.github.com/repos/${Repository}/releases?per_page=${pageSize}&page=${page}"
+            }
             $releases += $releasesPage
             $page++
         } while ($releasesPage.Count -eq $pageSize)
