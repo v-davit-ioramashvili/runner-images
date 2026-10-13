@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
     steps:
@@ -29,6 +29,7 @@ jobs:
           #!/bin/bash
           mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs dev /dev
           mount -t securityfs securityfs /sys/kernel/security
+          exec </dev/console >/dev/console 2>&1
           export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
           echo "ACTIVE_LSM=$(cat /sys/kernel/security/lsm)"
           t() { local s e; s=$(date +%s%N); "$@" >/dev/null 2>&1 || echo "FAIL $*" >&2; e=$(date +%s%N); echo $(( (e-s)/1000000 )); }
@@ -62,12 +63,6 @@ jobs:
           ls -lh /tmp/initrd.gz
           sudo cat "/boot/vmlinuz-$(uname -r)" > /tmp/vmlinuz
           sudo chmod 666 /dev/kvm
-
-      - name: Debug boot (console tail)
-        run: |
-          timeout 600 qemu-system-x86_64 -M q35 -m 12288 -smp 4 -enable-kvm -cpu host -nographic -no-reboot             -kernel /tmp/vmlinuz -initrd /tmp/initrd.gz             -append "console=ttyS0 panic=-1 rdinit=/init" > /tmp/dbg.log 2>&1 || echo "qemu exit $?"
-          grep -aiE 'initramfs|initrd|unpack|panic|Run /init|Kernel command|Memory:|ACTIVE_LSM|RESULT|error' /tmp/dbg.log | head -40
-          echo ---- tail; tail -30 /tmp/dbg.log
 
       - name: Run current LSM list vs +bpf (3 boots each, interleaved)
         run: |
