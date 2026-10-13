@@ -1,0 +1,87 @@
+# TEMPORARY - validation aid for #14783. Not part of any PR.
+# Boots each runner's own kernel in QEMU/KVM with the current LSM list vs +bpf and times
+# realistic CI workloads inside the guest (all in RAM, so disk noise does not hide LSM overhead).
+name: Validate BPF LSM real workloads 14783
+
+on:
+  push:
+    branches:
+      - 'validate/bpf-lsm-14783-realperf*'
+
+jobs:
+  perf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - name: Build guest root filesystem with workloads
+        run: |
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y qemu-system-x86 cpio >/dev/null
+          mkdir -p /tmp/ctx && cd /tmp/ctx
+          cat > package.json <<'J'
+          {"name":"bench","version":"1.0.0","private":true,"dependencies":{"next":"*","react":"*","react-dom":"*","typescript":"*","eslint":"*","jest":"*","webpack":"*","webpack-cli":"*","@babel/core":"*","@babel/preset-env":"*","express":"*"}}
+          J
+          cat > init <<'I'
+          #!/bin/bash
+          mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs dev /dev
+          mount -t securityfs securityfs /sys/kernel/security
+          export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          echo "ACTIVE_LSM=$(cat /sys/kernel/security/lsm)"
+          t() { local s e; s=$(date +%s%N); "$@" >/dev/null 2>&1 || echo "FAIL $*" >&2; e=$(date +%s%N); echo $(( (e-s)/1000000 )); }
+          for rep in 1 2; do
+            rm -rf /tmp/l
+            echo "RESULT checkout $(t git clone -q --shared /work/linux.git /tmp/l)"
+            echo "RESULT status $(t git -C /tmp/l status --porcelain)"
+            echo "RESULT rm-tree $(t rm -rf /tmp/l)"
+            rm -rf /work/app/node_modules
+            echo "RESULT npm-ci $(t bash -c 'cd /work/app && npm ci --offline --no-audit --no-fund --ignore-scripts --cache /work/npm-cache')"
+            rm -rf /tmp/g; mkdir /tmp/g; tar -xzf /work/git.tar.gz -C /tmp/g --strip-components=1
+            echo "RESULT build-git $(t make -C /tmp/g -j4 NO_CURL=1 NO_OPENSSL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1)"
+          done
+          echo DONE
+          busybox poweroff -f
+          I
+          cat > Dockerfile <<'D'
+          FROM ubuntu:24.04
+          RUN apt-get update && apt-get install -y --no-install-recommends git nodejs npm build-essential zlib1g-dev ca-certificates curl busybox-static && rm -rf /var/lib/apt/lists/*
+          RUN git clone -q --bare --depth 1 https://github.com/torvalds/linux /work/linux.git
+          COPY package.json /work/app/package.json
+          RUN cd /work/app && npm install --no-audit --no-fund --ignore-scripts --cache /work/npm-cache && rm -rf node_modules
+          RUN curl -fsSL -o /work/git.tar.gz https://github.com/git/git/archive/refs/tags/v2.47.0.tar.gz
+          COPY init /init
+          RUN chmod +x /init
+          D
+          docker build -q -t bench-root . >/dev/null
+          cid=$(docker create bench-root)
+          mkdir -p /tmp/rootfs && docker export "$cid" | sudo tar -x -C /tmp/rootfs
+          (cd /tmp/rootfs && sudo find . | sudo cpio -o -H newc --quiet | gzip -1 > /tmp/initrd.gz)
+          ls -lh /tmp/initrd.gz
+          sudo cat "/boot/vmlinuz-$(uname -r)" > /tmp/vmlinuz
+          sudo chmod 666 /dev/kvm
+
+      - name: Run current LSM list vs +bpf (3 boots each, interleaved)
+        run: |
+          base=landlock,lockdown,yama,integrity,apparmor
+          for round in 1 2 3; do
+            for cfg in base bpf; do
+              lsm=$base; [ $cfg = bpf ] && lsm=$base,bpf
+              timeout 1500 qemu-system-x86_64 -M q35 -m 12288 -smp 4 -enable-kvm -cpu host -nographic -no-reboot \
+                -kernel /tmp/vmlinuz -initrd /tmp/initrd.gz \
+                -append "console=ttyS0 quiet panic=-1 rdinit=/init lsm=$lsm" 2>&1 \
+                | tr -d '\r' | grep -aE '^(ACTIVE_LSM|RESULT|FAIL|DONE)' | sed "s/^/$cfg r$round /" | tee -a /tmp/results.txt
+            done
+          done
+          echo "=== median over 6 runs (3 boots x 2), milliseconds ==="
+          total_b=0; total_p=0
+          for w in checkout status rm-tree npm-ci build-git; do
+            med() { grep -a "^$1 r[0-9] RESULT $w " /tmp/results.txt | awk '{print $NF}' | sort -n | awk '{a[NR]=$1} END{print (a[int((NR+1)/2)]+a[int(NR/2)+1])/2}'; }
+            B=$(med base); P=$(med bpf)
+            total_b=$(awk -v a=$total_b -v b=$B 'BEGIN{print a+b}'); total_p=$(awk -v a=$total_p -v b=$P 'BEGIN{print a+b}')
+            awk -v w="$w" -v x="$B" -v y="$P" 'BEGIN{printf "SUMMARY %-10s base %8.0f  +bpf %8.0f  delta %+5.1f%%\n", w, x, y, (y-x)/x*100}'
+          done
+          awk -v x="$total_b" -v y="$total_p" 'BEGIN{printf "SUMMARY %-10s base %8.0f  +bpf %8.0f  delta %+5.1f%%\n", "ALL", x, y, (y-x)/x*100}'
+          grep -c DONE /tmp/results.txt
