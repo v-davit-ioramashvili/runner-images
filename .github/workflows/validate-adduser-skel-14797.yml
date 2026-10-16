@@ -50,7 +50,8 @@ jobs:
         run: |
           set -o pipefail
           # bash -e: `bash file` would otherwise drop the shebang's -e
-          sudo -E bash -e images/ubuntu/scripts/build/install-nvm.sh 2>&1 | tee /tmp/install.log
+          # 26.04 sudo ignores -E, so pass the build env explicitly
+          sudo HELPER_SCRIPTS="$HELPER_SCRIPTS" INSTALLER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER" GH_TOKEN="$GH_TOKEN" GITHUB_TOKEN="$GH_TOKEN" bash -e images/ubuntu/scripts/build/install-nvm.sh 2>&1 | tee /tmp/install.log
           grep -E "Tests Passed: [1-9][0-9]*, Failed: 0," /tmp/install.log
 
       - name: skel is clean, adduser works, nvm works for the new user
