@@ -1,0 +1,74 @@
+# TEMPORARY - validate the #14797 fix on current 26.04 images: run the real
+# install-nvm.sh from this branch, then adduser, Pester, nvm for a new user and
+# the reporter's Dokku install. Delete this file before opening the PR.
+name: Validate adduser skel 14797
+
+on:
+  push:
+    branches:
+      - 'validate/adduser-skel-14797*'
+
+jobs:
+  fix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            toolset: toolset-2604.json
+          - os: ubuntu-26.04-arm
+            toolset: toolset-2604-arm64.json
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      HELPER_SCRIPTS: ${{ github.workspace }}/images/ubuntu/scripts/helpers
+      INSTALLER_SCRIPT_FOLDER: /imagegeneration/installers
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - adduser fails on the image as shipped
+        run: |
+          echo "ImageVersion=$ImageVersion"; dpkg-query -W adduser
+          if sudo adduser --disabled-password --gecos "" before; then echo "UNEXPECTED: adduser works on stock image"; exit 1; fi
+          echo "baseline reproduced"
+
+      - name: Stage build environment
+        run: |
+          set -euxo pipefail
+          # install-nvm.sh does `mkdir $NVM_DIR`, so move the image's copy aside
+          sudo mv /etc/skel/.nvm /tmp/nvm-from-image
+          sudo install -d /imagegeneration/tests "$INSTALLER_SCRIPT_FOLDER"
+          sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" "$INSTALLER_SCRIPT_FOLDER/toolset.json"
+          sudo cp images/ubuntu/scripts/tests/*.ps1 images/ubuntu/scripts/tests/*.psm1 /imagegeneration/tests/
+          sudo chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
+          sudo ln -sf "$HELPER_SCRIPTS/invoke-tests.sh" /usr/local/bin/invoke_tests
+          sudo pwsh -Command "if (-not (Get-Module -ListAvailable Pester)) { Install-Module Pester -Force -Scope AllUsers -SkipPublisherCheck }"
+
+      - name: Run the real install-nvm.sh from this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          # bash -e: `bash file` would otherwise drop the shebang's -e
+          sudo -E bash -e images/ubuntu/scripts/build/install-nvm.sh 2>&1 | tee /tmp/install.log
+          grep -E "Tests Passed: [1-9][0-9]*, Failed: 0," /tmp/install.log
+
+      - name: skel is clean, adduser works, nvm works for the new user
+        run: |
+          set -euxo pipefail
+          test ! -e /etc/skel/.nvm/test
+          test "$(sudo find /etc/skel -name '*[! -~]*' | wc -l)" = 0
+          sudo adduser --disabled-password --gecos "" tuser
+          sudo -iu tuser env NVM_DIR=/home/tuser/.nvm bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm install --lts >/dev/null 2>&1 && node -v'
+
+      - name: Reporter's scenario - install Dokku
+        run: |
+          set -euxo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          wget -nv -O - https://packagecloud.io/dokku/dokku/gpgkey | sudo gpg --dearmor -o /etc/apt/keyrings/dokku-key.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/dokku-key.gpg] https://packagecloud.io/dokku/dokku/ubuntu/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/dokku.list
+          sudo apt-get update -q
+          echo dokku dokku/skip_key_file boolean true | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y dokku
+          dokku version
+          getent passwd dokku
