@@ -1,74 +1,21 @@
-# TEMPORARY - validate the #14797 fix: run the real install-nvm.sh from this branch
-# (removes $NVM_DIR/test), then check adduser, the nvm Pester test, nvm for a new
-# user, and that nvm's own upgrade path still works with test/ deleted.
+# TEMPORARY - recheck #14797 on the current 26.04 images.
 name: Validate adduser skel 14797
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - 'validate/adduser-skel-14797*'
 
 jobs:
-  fix:
+  recheck:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-26.04
-            toolset: toolset-2604.json
-          - os: ubuntu-26.04-arm
-            toolset: toolset-2604-arm64.json
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    env:
-      HELPER_SCRIPTS: ${{ github.workspace }}/images/ubuntu/scripts/helpers
-      INSTALLER_SCRIPT_FOLDER: /imagegeneration/installers
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Stage build environment
-        run: |
-          set -euxo pipefail
+      - run: |
           echo "ImageVersion=$ImageVersion"
-          # install-nvm.sh does `mkdir $NVM_DIR`, so move the image's copy aside
-          sudo mv /etc/skel/.nvm /tmp/nvm-from-image
-          sudo install -d /imagegeneration/tests "$INSTALLER_SCRIPT_FOLDER"
-          sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" "$INSTALLER_SCRIPT_FOLDER/toolset.json"
-          sudo cp images/ubuntu/scripts/tests/*.ps1 images/ubuntu/scripts/tests/*.psm1 /imagegeneration/tests/
-          sudo chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
-          sudo ln -sf "$HELPER_SCRIPTS/invoke-tests.sh" /usr/local/bin/invoke_tests
-          sudo pwsh -Command "if (-not (Get-Module -ListAvailable Pester)) { Install-Module Pester -Force -Scope AllUsers -SkipPublisherCheck }"
-
-      - name: Run the real install-nvm.sh from this branch (includes Pester 'Tools/nvm')
-        run: |
-          # bash -e: the script's shebang has -e, which `bash file` would otherwise drop
-          sudo -E HELPER_SCRIPTS="$HELPER_SCRIPTS" INSTALLER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER" bash -e images/ubuntu/scripts/build/install-nvm.sh 2>&1 | tee /tmp/install.log
-          grep -E "Tests Passed: [1-9]" /tmp/install.log
-          grep -E "Failed: 0," /tmp/install.log
-
-      - name: Check 1 - skel is clean and adduser works
-        run: |
-          set -euxo pipefail
-          test ! -e /etc/skel/.nvm/test
-          test "$(sudo find /etc/skel -name '*[! -~]*' | wc -l)" = 0
-          sudo adduser --disabled-password --gecos "" tuser
-          sudo -iu tuser bash -c 'source ~/.nvm/nvm.sh && nvm --version && nvm install --lts && nvm use --lts && node -v && nvm ls'
-
-      - name: Check 2 - nvm upgrade path, trimmed (test/ deleted) vs control (test/ restored)
-        run: |
-          set -uxo pipefail
-          # control user gets the same ~/.nvm, then restores test/ from git
-          sudo adduser --disabled-password --gecos "" cuser
-          sudo -iu cuser bash -c 'source ~/.nvm/nvm.sh && nvm install --lts >/dev/null 2>&1; cd ~/.nvm && git checkout -- test && echo "control restored test/: $(test -d test && echo yes)"'
-          rc=0
-          for u in tuser cuser; do
-            U="sudo -iu $u env NVM_DIR=/home/$u/.nvm PROFILE=/dev/null bash -c"
-            for v in v0.40.7 v0.40.8; do
-              echo "=== [$u] installer $v ==="
-              $U "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/$v/install.sh | bash >/dev/null 2>&1; echo installer-exit=\$?"
-              $U 'cd ~/.nvm && echo "HEAD=$(git describe --tags) status-lines=$(git status --short | wc -l) test-dir=$(test -d test && echo yes || echo no)"; echo "aliases: $(ls alias alias/lts 2>&1 | paste -sd " ")"'
-              $U 'source ~/.nvm/nvm.sh; echo "nvm=$(nvm --version)"; nvm use --lts >/dev/null 2>&1; echo use-lts-exit=$?; nvm use 24 >/dev/null 2>&1 && echo "use-24 node=$(node -v)"' || rc=1
-            done
-          done
-          exit $rc
+          dpkg-query -W adduser
+          echo "non-ascii in skel: $(sudo find /etc/skel -name '*[! -~]*' | wc -l)"
+          sudo adduser --disabled-password --gecos "" asis && echo "ADDUSER OK" || echo "ADDUSER FAILED"
