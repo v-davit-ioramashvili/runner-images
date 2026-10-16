@@ -8,6 +8,7 @@
 # Run 2 (mitigation): only the Server 2025 labels, which reproduced it in run 1 (all launches
 # came from InventorySvc). Applies the proposed Configure-System.ps1 change at job start -
 # disable InventorySvc + AppCompat DisableInventory=1 - and checks the launches stop.
+# Run 3: same mitigation, 90-minute watch, to catch anything else that starts CompatTelRunner later.
 # Delete this file before opening the PR.
 
 name: Validate CompatTelRunner (#14822)
@@ -17,7 +18,7 @@ on:
     inputs:
       minutes:
         description: 'How long to watch, in minutes'
-        default: '25'
+        default: '90'
   push:
     branches:
       - 'validate/compattelrunner-14822*'
@@ -31,10 +32,10 @@ jobs:
           - windows-2025
           - windows-2025-vs2026
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     env:
-      WATCH_MINUTES: ${{ inputs.minutes || '25' }}
+      WATCH_MINUTES: ${{ inputs.minutes || '90' }}
 
     steps:
       - name: Mitigation - disable InventorySvc + DisableInventory policy
