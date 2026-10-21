@@ -22,6 +22,7 @@ jobs:
 
     env:
       IMAGE_FOLDER: C:\image
+      TEMP_DIR: C:\image-temp
       SDK_INSTALL_ROOT: C:\Program Files (x86)\Android\android-sdk
 
     steps:
@@ -66,6 +67,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Path "$env:IMAGE_FOLDER\tests" -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:TEMP_DIR -Force | Out-Null
           Copy-Item .\images\windows\toolsets\toolset-win-11-arm64.json "$env:IMAGE_FOLDER\toolset.json" -Force
           Copy-Item .\images\windows\scripts\tests\*.ps1 "$env:IMAGE_FOLDER\tests" -Force
           [Environment]::SetEnvironmentVariable("IMAGE_FOLDER", $env:IMAGE_FOLDER, "Machine")
