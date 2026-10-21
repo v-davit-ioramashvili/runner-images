@@ -1,0 +1,180 @@
+# TEMPORARY - validation aid for #14721.
+# Runs the real Install-AndroidSDK.ps1 from this branch on a hosted windows-11-arm
+# runner, the way the image build does (toolset at C:\image\toolset.json, tests
+# under C:\image\tests, helper modules loaded), including its Android Pester tests
+# that this branch enables on Arm64. Measures install time and disk cost, renders
+# the software-report Android table, builds an arm64-v8a native lib with each
+# Android CMake, and confirms the emulator package is unavailable on Arm64.
+# Delete this file before opening the PR.
+
+name: Validate Android SDK ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/android-sdk-arm64*'
+
+jobs:
+  android-sdk:
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+
+    env:
+      IMAGE_FOLDER: C:\image
+      SDK_INSTALL_ROOT: C:\Program Files (x86)\Android\android-sdk
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Provide a JDK (17, win-arm64) for sdkmanager
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Test-Java($h) { return ($h -and (Test-Path (Join-Path $h "bin\java.exe"))) }
+          $jh = @($env:JAVA_HOME, $env:JAVA_HOME_17_arm64, $env:JAVA_HOME_21_arm64, $env:JAVA_HOME_17_X64) |
+                Where-Object { Test-Java $_ } | Select-Object -First 1
+          if (-not $jh) {
+            $zip = Join-Path $env:RUNNER_TEMP "jdk.zip"
+            Invoke-WebRequest -Uri "https://aka.ms/download-jdk/microsoft-jdk-17-windows-aarch64.zip" -OutFile $zip
+            Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "jdk") -Force
+            $jh = (Get-ChildItem (Join-Path $env:RUNNER_TEMP "jdk") -Directory | Select-Object -First 1).FullName
+          }
+          "JAVA_HOME=$jh" | Out-File $env:GITHUB_ENV -Append
+          "$jh\bin"       | Out-File $env:GITHUB_PATH -Append
+          & "$jh\bin\java.exe" -version 2>&1 | ForEach-Object { Write-Host "java: $_" }
+
+      - name: Baseline - disk and the Android SDK Visual Studio already ships
+        shell: pwsh
+        run: |
+          function Get-DirSize($p) { if (Test-Path $p) { (Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum } else { 0 } }
+          $free = (Get-PSDrive C).Free
+          $sdk  = Get-DirSize $env:SDK_INSTALL_ROOT
+          "FREE_BEFORE=$free" | Out-File $env:GITHUB_ENV -Append
+          "SDK_BEFORE=$sdk"   | Out-File $env:GITHUB_ENV -Append
+          Write-Host ("C: free before        : {0:N2} GB" -f ($free/1GB))
+          Write-Host ("VS-provided SDK size  : {0:N2} GB" -f ($sdk/1GB))
+          Write-Host "ANDROID_HOME (machine): '$([Environment]::GetEnvironmentVariable('ANDROID_HOME','Machine'))'"
+          if (Test-Path $env:SDK_INSTALL_ROOT) {
+            Get-ChildItem $env:SDK_INSTALL_ROOT -Directory | ForEach-Object {
+              Write-Host ("  {0,-20} {1,8:N0} MB" -f $_.Name, ((Get-DirSize $_.FullName)/1MB))
+            }
+          }
+
+      - name: Stage the build environment and run the real Install-AndroidSDK.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path "$env:IMAGE_FOLDER\tests" -Force | Out-Null
+          Copy-Item .\images\windows\toolsets\toolset-win-11-arm64.json "$env:IMAGE_FOLDER\toolset.json" -Force
+          Copy-Item .\images\windows\scripts\tests\*.ps1 "$env:IMAGE_FOLDER\tests" -Force
+          [Environment]::SetEnvironmentVariable("IMAGE_FOLDER", $env:IMAGE_FOLDER, "Machine")
+
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          . .\images\windows\scripts\build\Install-AndroidSDK.ps1
+          $sw.Stop()
+          "INSTALL_MIN=$([math]::Round($sw.Elapsed.TotalMinutes,1))" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "Install-AndroidSDK.ps1 (incl. Android Pester tests) took $([math]::Round($sw.Elapsed.TotalMinutes,1)) min"
+
+      - name: Measure the real disk cost
+        if: always()
+        shell: pwsh
+        run: |
+          function Get-DirSize($p) { if (Test-Path $p) { (Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum } else { 0 } }
+          $free = (Get-PSDrive C).Free
+          $sdk  = Get-DirSize $env:SDK_INSTALL_ROOT
+          $driveDelta = [long]$env:FREE_BEFORE - $free
+          $sdkDelta   = $sdk - [long]$env:SDK_BEFORE
+          "DRIVE_DELTA_GB=$([math]::Round($driveDelta/1GB,2))" | Out-File $env:GITHUB_ENV -Append
+          "SDK_AFTER_GB=$([math]::Round($sdk/1GB,2))"          | Out-File $env:GITHUB_ENV -Append
+          "SDK_DELTA_GB=$([math]::Round($sdkDelta/1GB,2))"     | Out-File $env:GITHUB_ENV -Append
+          Write-Host ("SDK size after        : {0:N2} GB (+{1:N2} GB over the VS-provided SDK)" -f ($sdk/1GB), ($sdkDelta/1GB))
+          Write-Host ("C: used by the install: {0:N2} GB" -f ($driveDelta/1GB))
+          Write-Host "--- per component ---"
+          Get-ChildItem $env:SDK_INSTALL_ROOT -Directory | ForEach-Object {
+            Write-Host ("  {0,-20} {1,8:N0} MB" -f $_.Name, ((Get-DirSize $_.FullName)/1MB))
+            if ($_.Name -in @("cmake","ndk","build-tools","platforms")) {
+              Get-ChildItem $_.FullName -Directory | ForEach-Object {
+                Write-Host ("      {0,-16} {1,8:N0} MB" -f $_.Name, ((Get-DirSize $_.FullName)/1MB))
+              }
+            }
+          }
+          Write-Host "--- machine env vars set by the script ---"
+          foreach ($v in "ANDROID_HOME","ANDROID_SDK_ROOT","ANDROID_NDK","ANDROID_NDK_HOME","ANDROID_NDK_ROOT","ANDROID_NDK_LATEST_HOME") {
+            Write-Host ("  {0,-24} {1}" -f $v, [Environment]::GetEnvironmentVariable($v,"Machine"))
+          }
+
+      - name: Software report - render the Android table on Arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($v in "ANDROID_HOME","ANDROID_SDK_ROOT","ANDROID_NDK","ANDROID_NDK_HOME","ANDROID_NDK_ROOT","ANDROID_NDK_LATEST_HOME") {
+            Set-Item "env:$v" ([Environment]::GetEnvironmentVariable($v,"Machine"))
+          }
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\docs-gen\SoftwareReport.Helpers.psm1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\docs-gen\SoftwareReport.Android.psm1 -Force -DisableNameChecking
+          Build-AndroidTable | Format-Table -AutoSize | Out-String -Width 220 | Write-Host
+          Build-AndroidEnvironmentTable | Format-Table -AutoSize | Out-String -Width 220 | Write-Host
+
+      - name: Native build - arm64-v8a lib with each Android CMake and the default NDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sdk = [Environment]::GetEnvironmentVariable("ANDROID_HOME","Machine")
+          $ndk = [Environment]::GetEnvironmentVariable("ANDROID_NDK","Machine")
+          $toolchain = Join-Path $ndk "build\cmake\android.toolchain.cmake"
+          $src = Join-Path $env:RUNNER_TEMP "nativelib"
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          Set-Content (Join-Path $src "hello.cpp") 'extern "C" int add(int a, int b) { return a + b; }'
+          Set-Content (Join-Path $src "CMakeLists.txt") @(
+            'cmake_minimum_required(VERSION 3.22)',
+            'project(hello CXX)',
+            'add_library(hello SHARED hello.cpp)'
+          )
+          $bad = @()
+          $toolset = Get-Content .\images\windows\toolsets\toolset-win-11-arm64.json -Raw | ConvertFrom-Json
+          foreach ($v in ($toolset.android.additional_tools | Where-Object { $_ -like "cmake;*" } | ForEach-Object { $_.Split(';')[1] })) {
+            $cm = Join-Path $sdk "cmake\$v\bin\cmake.exe"; $nj = Join-Path $sdk "cmake\$v\bin\ninja.exe"
+            $b = Join-Path $env:RUNNER_TEMP "b_$v"
+            & $cm -G Ninja -S $src -B $b -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DCMAKE_MAKE_PROGRAM="$nj" | Out-Null
+            $c = $LASTEXITCODE; $d = 1
+            if ($c -eq 0) { & $cm --build $b | Out-Null; $d = $LASTEXITCODE }
+            $ok = ($c -eq 0 -and $d -eq 0 -and (Test-Path (Join-Path $b "libhello.so")))
+            Write-Host ("cmake {0} + NDK {1}: {2}" -f $v, (Split-Path $ndk -Leaf), $(if ($ok) {"BUILT"} else {"FAILED"}))
+            if (-not $ok) { $bad += $v }
+          }
+          if ($bad) { throw "native build failed for: $($bad -join ', ')" }
+
+      - name: Confirm the emulator package is unavailable on Arm64 (why the script skips it)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $sdkmanager = Join-Path $env:SDK_INSTALL_ROOT "cmdline-tools\latest\bin\sdkmanager.bat"
+          $root = Join-Path $env:RUNNER_TEMP "emuprobe"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $yes = [string]::Join("`n", (1..20 | ForEach-Object { "y" }))
+          $yes | & $sdkmanager --licenses --sdk_root=$root | Out-Null
+          $out = & $sdkmanager --install emulator --sdk_root=$root 2>&1
+          $code = $LASTEXITCODE
+          $out | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" }
+          Write-Host "EMULATOR_PROBE: sdkmanager --install emulator on Arm64 -> exit $code, installed=$(Test-Path (Join-Path $root 'emulator\emulator.exe'))"
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $s = $env:GITHUB_STEP_SUMMARY
+          "### Android SDK on windows-11-arm" | Out-File $s -Append
+          "| Metric | Value |" | Out-File $s -Append
+          "| --- | --- |" | Out-File $s -Append
+          "| Install time (incl. tests) | $env:INSTALL_MIN min |" | Out-File $s -Append
+          "| SDK size after | $env:SDK_AFTER_GB GB |" | Out-File $s -Append
+          "| Added over VS-provided SDK | $env:SDK_DELTA_GB GB |" | Out-File $s -Append
+          "| C: drive used | $env:DRIVE_DELTA_GB GB |" | Out-File $s -Append
