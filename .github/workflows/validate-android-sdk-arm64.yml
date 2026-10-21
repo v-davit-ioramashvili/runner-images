@@ -63,24 +63,31 @@ jobs:
           }
 
       - name: Stage the build environment and run the real Install-AndroidSDK.ps1
-        shell: pwsh
+        # the packer "powershell" provisioner runs build scripts in Windows PowerShell 5.1
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          Write-Host "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
           New-Item -ItemType Directory -Path "$env:IMAGE_FOLDER\tests" -Force | Out-Null
           New-Item -ItemType Directory -Path $env:TEMP_DIR -Force | Out-Null
           Copy-Item .\images\windows\toolsets\toolset-win-11-arm64.json "$env:IMAGE_FOLDER\toolset.json" -Force
           Copy-Item .\images\windows\scripts\tests\*.ps1 "$env:IMAGE_FOLDER\tests" -Force
           [Environment]::SetEnvironmentVariable("IMAGE_FOLDER", $env:IMAGE_FOLDER, "Machine")
 
-          Import-Module Pester -Force
+          if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 })) {
+            Install-Module Pester -MinimumVersion 5.5 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module Pester -MinimumVersion 5.0 -Force
+          Write-Host "Pester $((Get-Module Pester).Version)"
           Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
           Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
 
           $sw = [Diagnostics.Stopwatch]::StartNew()
           . .\images\windows\scripts\build\Install-AndroidSDK.ps1
           $sw.Stop()
-          "INSTALL_MIN=$([math]::Round($sw.Elapsed.TotalMinutes,1))" | Out-File $env:GITHUB_ENV -Append
-          Write-Host "Install-AndroidSDK.ps1 (incl. Android Pester tests) took $([math]::Round($sw.Elapsed.TotalMinutes,1)) min"
+          $min = [math]::Round($sw.Elapsed.TotalMinutes, 1)
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "INSTALL_MIN=$min`n")
+          Write-Host "Install-AndroidSDK.ps1 (incl. Android Pester tests) took $min min"
 
       - name: Measure the real disk cost
         if: always()
