@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Probe a shell pwsh step
         shell: pwsh
-        run: ./.github/repro-15107/probe.ps1 -Label 'shell: pwsh step'
+        run: ./.github/repro-15107/probe.ps1 -Label 'shell=pwsh step'
       - name: Probe pwsh spawned from Node (as @actions/exec does)
         shell: cmd
         run: |
