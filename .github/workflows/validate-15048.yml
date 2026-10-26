@@ -29,3 +29,13 @@ jobs:
           sudo apt-get update -qq
           apt-cache policy ${{ matrix.pkg }}-cli
           zcat /usr/share/doc/${{ matrix.pkg }}-cli/changelog.Debian.gz | head -15
+      - name: Workaround - upgrade installed PHP packages
+        run: |
+          start=$(date +%s)
+          sudo apt-get install -y -qq --only-upgrade $(dpkg-query -W -f='${Package}\n' '${{ matrix.pkg }}*') > /dev/null
+          echo "upgrade took $(( $(date +%s) - start ))s"
+          php -v | head -1
+          inst=$(dpkg-query -W -f='${Version}' ${{ matrix.pkg }}-cli)
+          if dpkg --compare-versions "$inst" ge "${{ matrix.fixed }}"; then echo "AFTER: PATCHED $inst"; else echo "AFTER: NOT PATCHED $inst"; exit 1; fi
+          dpkg-query -W -f='${Package} ${Version}\n' '${{ matrix.pkg }}*' | grep -v -F "${{ matrix.fixed }}" | grep -E "ubuntu" || echo "all core ${{ matrix.pkg }} packages at fixed revision"
+          composer --version; php -m | grep -c . 
