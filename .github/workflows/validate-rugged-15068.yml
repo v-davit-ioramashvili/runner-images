@@ -1,0 +1,37 @@
+name: Validate rugged / libjitterentropy (#15068)
+
+on:
+  push:
+    branches: [validate/rugged-jitterentropy-15068]
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: Inspect libcrypto static deps
+        run: |
+          cat /etc/os-release | grep VERSION=
+          dpkg -l libssl-dev libjitterentropy3-dev 2>&1 | tail -n +6 || true
+          pkg-config --libs --static libcrypto
+          find / -name 'libjitterentropy*' 2>/dev/null || true
+      - name: gem install rugged (as-is image)
+        id: asis
+        continue-on-error: true
+        run: gem install rugged -v 1.9.6 --no-document
+      - name: Show mkmf.log on failure
+        if: steps.asis.outcome == 'failure'
+        run: find / -path '*rugged-1.9.6*/mkmf.log' 2>/dev/null | head -1 | xargs -r grep -iE -B2 -A2 'jitter|cannot find|undefined reference' | head -40
+      - name: Apply workaround and retry
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libjitterentropy3-dev
+          gem install rugged -v 1.9.6 --no-document
+          ruby -e 'require "rugged"; puts "rugged #{Rugged::VERSION}, libgit2 #{Rugged.libgit2_version.join(".")}"'
+      - name: Summary
+        run: echo "${{ matrix.os }} as-is outcome = ${{ steps.asis.outcome }}" | tee -a $GITHUB_STEP_SUMMARY
