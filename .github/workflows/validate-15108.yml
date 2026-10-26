@@ -1,0 +1,87 @@
+name: Validate sysctl.conf not applied 15108
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm, ubuntu-slim]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Image and systemd info
+        shell: bash
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          uname -r
+          systemctl --version | head -1 || true
+          dpkg -l procps systemd 2>/dev/null | grep ^ii || true
+
+      - name: Live kernel values vs /etc/sysctl.conf
+        shell: bash
+        run: |
+          for k in fs.inotify.max_user_instances fs.inotify.max_user_watches vm.max_map_count vm.mmap_rnd_bits; do
+            printf '%-32s live=%-10s conf=%s\n' "$k" "$(sysctl -n $k 2>/dev/null)" "$(grep -E "^$k=" /etc/sysctl.conf | tail -1 | cut -d= -f2)"
+          done
+          echo "--- tail /etc/sysctl.conf"; tail -6 /etc/sysctl.conf || true
+
+      - name: Which sysctl.d files systemd-sysctl reads
+        shell: bash
+        run: |
+          echo "--- /etc/sysctl.d"; ls -l /etc/sysctl.d/ || true
+          echo "--- /usr/lib/sysctl.d"; ls -l /usr/lib/sysctl.d/ || true
+          echo "--- /run/sysctl.d"; ls -l /run/sysctl.d/ 2>/dev/null || echo none
+          echo "--- cat-config hits"
+          systemd-analyze cat-config sysctl.d 2>/dev/null | grep -nE '^# /|inotify|max_map_count|mmap_rnd_bits' || true
+          echo "--- systemd-sysctl unit"
+          systemctl status systemd-sysctl --no-pager 2>&1 | head -8 || true
+
+      - name: inotify instance exhaustion (200 instances)
+        shell: bash
+        continue-on-error: true
+        run: |
+          python3 - <<'EOF'
+          import ctypes, os
+          libc = ctypes.CDLL("libc.so.6", use_errno=True)
+          fds = []
+          for i in range(200):
+              fd = libc.inotify_init()
+              if fd < 0:
+                  print(f"inotify_init failed after {i} instances: {os.strerror(ctypes.get_errno())}")
+                  raise SystemExit(1)
+              fds.append(fd)
+          print("opened 200 inotify instances OK")
+          EOF
+
+      - name: Candidate fix - drop-in under /etc/sysctl.d + reload
+        if: matrix.os != 'ubuntu-slim'
+        shell: bash
+        run: |
+          sudo tee /etc/sysctl.d/99-runner-image.conf >/dev/null <<'EOF'
+          vm.max_map_count=262144
+          fs.inotify.max_user_watches=655360
+          fs.inotify.max_user_instances=1280
+          vm.mmap_rnd_bits=28
+          EOF
+          sudo systemctl restart systemd-sysctl
+          for k in fs.inotify.max_user_instances fs.inotify.max_user_watches vm.max_map_count vm.mmap_rnd_bits; do
+            printf '%-32s after=%s\n' "$k" "$(sysctl -n $k)"
+          done
+          echo "--- cat-config order for inotify"
+          systemd-analyze cat-config sysctl.d | grep -nE '^# /|inotify' || true
+
+      - name: inotify instance exhaustion after fix
+        if: matrix.os != 'ubuntu-slim'
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import ctypes, os
+          libc = ctypes.CDLL("libc.so.6", use_errno=True)
+          for i in range(200):
+              if libc.inotify_init() < 0:
+                  print(f"inotify_init failed after {i}: {os.strerror(ctypes.get_errno())}")
+                  raise SystemExit(1)
+          print("opened 200 inotify instances OK")
+          EOF
