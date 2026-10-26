@@ -1,4 +1,4 @@
-name: Validate sysctl.conf not applied 15108
+name: Validate sysctl.d fix 15108
 
 on:
   workflow_dispatch:
@@ -8,14 +8,82 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Root-only values
+      - uses: actions/checkout@v4
+        with:
+          repository: v-davit-ioramashvili/runner-images
+          ref: fix/15108-sysctl-dropin
+
+      - name: Simulate an image without the old /etc/sysctl.conf lines
         shell: bash
         run: |
           echo "ImageVersion=$ImageVersion"
-          for k in vm.mmap_rnd_bits vm.max_map_count; do
-            printf '%-20s live=%s conf=%s\n' "$k" "$(sudo sysctl -n $k)" "$(grep -E "^$k=" /etc/sysctl.conf | tail -1 | cut -d= -f2)"
+          sudo sed -i -E '/^(vm\.max_map_count|fs\.inotify\.max_user_watches|fs\.inotify\.max_user_instances|vm\.mmap_rnd_bits)=/d' /etc/sysctl.conf
+          sudo sysctl -w fs.inotify.max_user_instances=128 fs.inotify.max_user_watches=8192 vm.mmap_rnd_bits=30 vm.max_map_count=65530
+          echo "--- Ubuntu's own map-count default (if any)"
+          systemd-analyze cat-config sysctl.d | grep -nE '^# /.*map-count|^vm.max_map_count' || echo "none"
+
+      - name: Negative control - Pester test must fail before the fix
+        id: negative
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Import-Module ./images/ubuntu/scripts/tests/Helpers.psm1 -DisableNameChecking
+          $c = New-PesterConfiguration
+          $c.Run.Path = './images/ubuntu/scripts/tests/System.Tests.ps1'
+          $c.Filter.FullName = 'Kernel parameters*'
+          $c.Output.Verbosity = 'Detailed'
+          $c.Run.Exit = $true
+          Invoke-Pester -Configuration $c
+
+      - name: Assert negative control failed
+        shell: bash
+        run: |
+          echo "negative control outcome: ${{ steps.negative.outcome }}"
+          [ "${{ steps.negative.outcome }}" = "failure" ]
+
+      - name: Run the sysctl block from configure-environment.sh
+        shell: bash
+        run: |
+          script=images/ubuntu/scripts/build/configure-environment.sh
+          { echo "source $PWD/images/ubuntu/scripts/helpers/os.sh"; sed -n '/issues\/15108/,/pull\/7860/p' $script | sed '$d'; } > /tmp/sysctl-block.sh
+          cat /tmp/sysctl-block.sh
+          sudo bash -e /tmp/sysctl-block.sh
+          echo "--- drop-in"
+          cat /etc/sysctl.d/99-runner-images.conf
+
+      - name: Apply sysctl.d the way boot does (systemd-sysctl)
+        shell: bash
+        run: |
+          sudo systemctl restart systemd-sysctl
+          systemctl is-active systemd-sysctl
+          systemd-analyze cat-config sysctl.d | grep -nE '^# /|max_map_count|inotify|mmap_rnd_bits' | tail -12
+          for k in fs.inotify.max_user_instances fs.inotify.max_user_watches vm.mmap_rnd_bits vm.max_map_count; do
+            printf '%-32s %s\n' "$k" "$(sudo sysctl -n $k)"
           done
-          grep -h CONFIG_ARCH_MMAP_RND_BITS /boot/config-$(uname -r) 2>/dev/null || true
+
+      - name: Pester test must pass after the fix
+        shell: pwsh
+        run: |
+          Import-Module ./images/ubuntu/scripts/tests/Helpers.psm1 -DisableNameChecking
+          $c = New-PesterConfiguration
+          $c.Run.Path = './images/ubuntu/scripts/tests/System.Tests.ps1'
+          $c.Filter.FullName = 'Kernel parameters*'
+          $c.Output.Verbosity = 'Detailed'
+          $c.Run.Exit = $true
+          Invoke-Pester -Configuration $c
+
+      - name: 200 inotify instances
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import ctypes, os
+          libc = ctypes.CDLL("libc.so.6", use_errno=True)
+          for i in range(200):
+              if libc.inotify_init() < 0:
+                  print(f"inotify_init failed after {i}: {os.strerror(ctypes.get_errno())}")
+                  raise SystemExit(1)
+          print("opened 200 inotify instances OK")
+          EOF
