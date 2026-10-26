@@ -1,0 +1,64 @@
+name: Repro 15107 pwsh CLR crash
+
+# Reproduces actions/runner-images#15107 (pwsh "Internal CLR error. (0x80131506)" on windows-11-arm) and
+# checks a workaround. pwsh is launched exactly as actions/setup-dotnet launches it.
+#   stress-*   : small gen0 budget to raise the crash rate (DOTNET_GCgen0MaxBudget=40000, 256 KiB)
+#   default-*  : image as shipped, no GC settings (baseline rate)
+#   gen0size-* : DOTNET_GCgen0size=4000000 (64 MiB), the candidate workaround
+on:
+  push:
+    branches: [repro/15107-pwsh-jumplist-crash]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe a shell pwsh step
+        shell: pwsh
+        run: ./.github/repro-15107/probe.ps1 -Label 'shell: pwsh step'
+      - name: Probe pwsh spawned from Node (as @actions/exec does)
+        shell: cmd
+        run: |
+          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, default'],{stdio:'inherit'})"
+          set DOTNET_GCgen0size=4000000
+          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, GCgen0size'],{stdio:'inherit'})"
+          set DOTNET_GCgen0size=
+          set DOTNET_GCgen0MaxBudget=40000
+          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, GCgen0MaxBudget=40000'],{stdio:'inherit'})"
+          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, windowsHide'],{stdio:'inherit',windowsHide:true})"
+
+  launches:
+    name: ${{ matrix.name }}
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: stress-visible, launches: 500, hide: '0', budget: '40000', gen0size: '' }
+          - { name: stress-hidden, launches: 500, hide: '1', budget: '40000', gen0size: '' }
+          - { name: stress-visible-gen0size, launches: 500, hide: '0', budget: '40000', gen0size: '4000000' }
+          - { name: default-1, launches: 3000, hide: '0', budget: '', gen0size: '' }
+          - { name: default-2, launches: 3000, hide: '0', budget: '', gen0size: '' }
+          - { name: default-3, launches: 3000, hide: '0', budget: '', gen0size: '' }
+          - { name: default-4, launches: 3000, hide: '0', budget: '', gen0size: '' }
+          - { name: gen0size-1, launches: 3000, hide: '0', budget: '', gen0size: '4000000' }
+          - { name: gen0size-2, launches: 3000, hide: '0', budget: '', gen0size: '4000000' }
+          - { name: gen0size-3, launches: 3000, hide: '0', budget: '', gen0size: '4000000' }
+          - { name: gen0size-4, launches: 3000, hide: '0', budget: '', gen0size: '4000000' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Launch pwsh ${{ matrix.launches }} times
+        shell: pwsh
+        env:
+          LAUNCHES: ${{ matrix.launches }}
+          HIDE: ${{ matrix.hide }}
+          GC_BUDGET: ${{ matrix.budget }}
+          GC_GEN0SIZE: ${{ matrix.gen0size }}
+        run: |
+          # Set the GC variables only for the harness, so this pwsh step itself is not affected.
+          if ($env:GC_BUDGET) { $env:DOTNET_GCgen0MaxBudget = $env:GC_BUDGET }
+          if ($env:GC_GEN0SIZE) { $env:DOTNET_GCgen0size = $env:GC_GEN0SIZE }
+          node .github/repro-15107/harness.js
