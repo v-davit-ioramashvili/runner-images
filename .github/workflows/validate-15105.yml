@@ -1,0 +1,33 @@
+name: Validate hardcoded vsts path 15105
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Agent user and home layout
+        shell: bash
+        run: |
+          echo "user=$(whoami) home=$HOME"
+          ls -ld /home /home/*
+          getent passwd vsts || echo "no vsts user in image"
+          getent passwd runner || echo "no runner user in image"
+
+      - name: git init hardcoded /home/vsts path (pwsh, like the report)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          git init "/home/vsts/work/1/s"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: git init under the agent's own workspace
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:GITHUB_WORKSPACE "s"
+          git init $dir
