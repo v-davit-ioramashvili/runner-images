@@ -8,27 +8,10 @@ name: Repro 15107 pwsh CLR crash
 on:
   push:
     branches: [repro/15107-pwsh-jumplist-crash]
+    paths: ['.github/repro-15107/harness.js']
   workflow_dispatch:
 
 jobs:
-  probe:
-    runs-on: windows-11-arm
-    steps:
-      - uses: actions/checkout@v4
-      - name: Probe a shell pwsh step
-        shell: pwsh
-        run: ./.github/repro-15107/probe.ps1 -Label 'shell=pwsh step'
-      - name: Probe pwsh spawned from Node (as @actions/exec does)
-        shell: cmd
-        run: |
-          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, default'],{stdio:'inherit'})"
-          set DOTNET_GCgen0size=4000000
-          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, GCgen0size'],{stdio:'inherit'})"
-          set DOTNET_GCgen0size=
-          set DOTNET_GCgen0MaxBudget=40000
-          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, GCgen0MaxBudget=40000'],{stdio:'inherit'})"
-          node -e "require('child_process').spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-File','.github/repro-15107/probe.ps1','-Label','node spawn, windowsHide'],{stdio:'inherit',windowsHide:true})"
-
   launches:
     name: ${{ matrix.name }}
     runs-on: windows-11-arm
