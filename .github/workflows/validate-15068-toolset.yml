@@ -1,0 +1,45 @@
+name: Validate 26.04 toolset install of libjitterentropy3-dev (#15068)
+
+# Installs the new toolset entry the same way install-apt-common.sh does
+# (--no-install-recommends), checks the docs-gen version lookup, then proves a
+# static OpenSSL link and the rugged gem build both succeed.
+
+on:
+  push:
+    branches: [validate/15068-toolset-install]
+
+jobs:
+  toolset:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-26.04, toolset: toolset-2604.json }
+          - { os: ubuntu-26.04-arm, toolset: toolset-2604-arm64.json }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install new common package like install-apt-common.sh
+        run: |
+          pkg=$(jq -r '.apt.common_packages[] | select(. == "libjitterentropy3-dev")' images/ubuntu/toolsets/${{ matrix.toolset }})
+          test "$pkg" = "libjitterentropy3-dev"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends $pkg
+      - name: Docs-gen version lookup
+        shell: pwsh
+        run: |
+          $version = $(dpkg-query -W -f '${Version}' libjitterentropy3-dev)
+          if (-not $version) { throw "no version" }
+          "libjitterentropy3-dev $version"
+      - name: Static OpenSSL link via pkg-config
+        run: |
+          printf '#include <openssl/rand.h>\nint main(void){unsigned char b[8];return RAND_bytes(b,8)!=1;}\n' > t.c
+          gcc t.c -o t -static $(pkg-config --cflags --libs --static libcrypto)
+          ./t && echo "static libcrypto link + RAND_bytes OK"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: gem install rugged
+        run: |
+          gem install rugged -v 1.9.6 --no-document
+          ruby -e 'require "rugged"; puts "rugged #{Rugged::VERSION}"'
