@@ -1,0 +1,31 @@
+name: Validate PHP CVE patch level 15048
+on: workflow_dispatch
+jobs:
+  php:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            pkg: php8.1
+            fixed: 8.1.2-1ubuntu2.28
+          - os: ubuntu-24.04
+            pkg: php8.3
+            fixed: 8.3.6-0ubuntu0.24.04.13
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Image and installed PHP revision
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          php -v | head -1
+          dpkg-query -W -f='${Package} ${Version}\n' '${{ matrix.pkg }}*' | sort
+      - name: Compare with Ubuntu fix revision
+        run: |
+          inst=$(dpkg-query -W -f='${Version}' ${{ matrix.pkg }}-cli)
+          echo "installed=$inst fixed=${{ matrix.fixed }}"
+          if dpkg --compare-versions "$inst" ge "${{ matrix.fixed }}"; then echo "PATCHED"; else echo "NOT PATCHED"; fi
+      - name: Candidate after apt update
+        run: |
+          sudo apt-get update -qq
+          apt-cache policy ${{ matrix.pkg }}-cli
+          zcat /usr/share/doc/${{ matrix.pkg }}-cli/changelog.Debian.gz | head -15
