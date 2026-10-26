@@ -30,12 +30,15 @@ jobs:
           apt-cache policy ${{ matrix.pkg }}-cli
           zcat /usr/share/doc/${{ matrix.pkg }}-cli/changelog.Debian.gz | head -15
       - name: Workaround - upgrade installed PHP packages
+      - name: Workaround - upgrade installed PHP packages
         run: |
+          pkgs=$(dpkg -l '${{ matrix.pkg }}*' | awk '/^ii/{print $2}')
           start=$(date +%s)
-          sudo apt-get install -y -qq --only-upgrade $(dpkg-query -W -f='${Package}\n' '${{ matrix.pkg }}*') > /dev/null
+          sudo apt-get install -y -qq --only-upgrade $pkgs > /dev/null
           echo "upgrade took $(( $(date +%s) - start ))s"
           php -v | head -1
           inst=$(dpkg-query -W -f='${Version}' ${{ matrix.pkg }}-cli)
           if dpkg --compare-versions "$inst" ge "${{ matrix.fixed }}"; then echo "AFTER: PATCHED $inst"; else echo "AFTER: NOT PATCHED $inst"; exit 1; fi
-          dpkg-query -W -f='${Package} ${Version}\n' '${{ matrix.pkg }}*' | grep -v -F "${{ matrix.fixed }}" | grep -E "ubuntu" || echo "all core ${{ matrix.pkg }} packages at fixed revision"
-          composer --version; php -m | grep -c . 
+          echo "core packages still below fix: $(dpkg -l '${{ matrix.pkg }}*' | awk '/^ii/ && $3 ~ /ubuntu/ {print $3}' | grep -v -c -F '${{ matrix.fixed }}' || true)"
+          composer --version
+          echo "loaded modules: $(php -m | grep -c -v -E '^\[|^$')"
