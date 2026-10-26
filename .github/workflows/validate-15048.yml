@@ -30,7 +30,6 @@ jobs:
           apt-cache policy ${{ matrix.pkg }}-cli
           zcat /usr/share/doc/${{ matrix.pkg }}-cli/changelog.Debian.gz | head -15
       - name: Workaround - upgrade installed PHP packages
-      - name: Workaround - upgrade installed PHP packages
         run: |
           pkgs=$(dpkg -l '${{ matrix.pkg }}*' | awk '/^ii/{print $2}')
           start=$(date +%s)
