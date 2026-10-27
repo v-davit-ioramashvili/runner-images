@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025-vs2026, windows-2025, windows-2022]
+        os: [windows-2025-vs2026, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
@@ -56,7 +56,7 @@ jobs:
               <Message Importance="High" Text="MSBuild $(MSBuildVersion) | 64-bit: $([System.Environment]::Is64BitProcess) | target length: $([System.String]::Copy('$(LongFile)').Length)" />
             </Target>
             <Target Name="Repro" DependsOnTargets="Info">
-              <MakeDir Directories="$(LongDir)" />
+              <MakeDir Directories="$(LongDir)" ContinueOnError="ErrorAndContinue" />
               <Copy SourceFiles="@(Src)" DestinationFiles="$(LongFile)" ContinueOnError="ErrorAndContinue" />
               <WriteLinesToFile File="$(LongFile).w.txt" Lines="ok" Overwrite="true" ContinueOnError="ErrorAndContinue" />
               <Copy SourceFiles="$(LongFile)" DestinationFolder="$(Base)\back" ContinueOnError="ErrorAndContinue" />
