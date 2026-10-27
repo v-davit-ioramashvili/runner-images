@@ -47,6 +47,13 @@ jobs:
           "winget exit: $LASTEXITCODE, took $([int]$sw.Elapsed.TotalSeconds)s"
           winget list --id GitTower.GitFlowNext 2>&1
 
+      - name: Is winget's git-flow usable in the next step
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-Command git-flow -All -ErrorAction SilentlyContinue | Format-Table Source -AutoSize | Out-String
+          git flow version
+
   install:
     strategy:
       fail-fast: false
@@ -64,8 +71,9 @@ jobs:
           $base = "https://github.com/gittower/git-flow-next/releases/download/v$version"
           $dir  = Join-Path $env:RUNNER_TEMP 'git-flow-next'
           Invoke-WebRequest "$base/$zip" -OutFile "$env:RUNNER_TEMP\$zip"
-          $sums = (Invoke-WebRequest "$base/git-flow-next-v$version-checksums.txt").Content
-          $expected = ($sums -split "`n" | Where-Object { $_ -match [regex]::Escape($zip) }) -split '\s+' | Select-Object -First 1
+          Invoke-WebRequest "$base/git-flow-next-v$version-checksums.txt" -OutFile "$env:RUNNER_TEMP\checksums.txt"
+          $expected = (Select-String -Path "$env:RUNNER_TEMP\checksums.txt" -SimpleMatch $zip).Line.Split(' ')[0]
+          "expected sha256: $expected"
           if ((Get-FileHash "$env:RUNNER_TEMP\$zip" -Algorithm SHA256).Hash -ne $expected) { throw "Checksum mismatch for $zip" }
           Expand-Archive "$env:RUNNER_TEMP\$zip" -DestinationPath $dir -Force
           Get-ChildItem $dir -Recurse | Select-Object -ExpandProperty FullName
