@@ -55,11 +55,11 @@ jobs:
       matrix:
         os: [windows-2022, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
-    env:
-      AGENT_TEMPDIRECTORY: ${{ runner.temp }}
     steps:
       - name: ADO script body
         shell: pwsh
+        env:
+          AGENT_TEMPDIRECTORY: ${{ runner.temp }}
         run: |
           $out = & {
             $version = '2.1.0'
