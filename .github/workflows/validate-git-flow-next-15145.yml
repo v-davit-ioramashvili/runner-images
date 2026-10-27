@@ -5,32 +5,80 @@ on:
     branches: [validate/15145-git-flow-next]
 
 jobs:
-  probe:
+  # Exact GitHub Actions snippet from 15145-reply.md, then use from every shell in later steps.
+  snippet-gha:
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: What does the image ship today
+      - name: Install git-flow-next
         shell: pwsh
         run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          "ImageVersion: $env:ImageVersion"
-          git --version
-          "--- git-flow on PATH"
-          Get-Command git-flow -All -ErrorAction SilentlyContinue | Format-Table Source -AutoSize | Out-String
-          "--- git-flow files under Git install"
-          Get-ChildItem 'C:\Program Files\Git' -Recurse -Filter 'git-flow*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-          "--- git flow (pwsh)"
-          git flow version 2>&1
-          "--- git flow (bash)"
-          bash -lc 'git flow version' 2>&1
-          "--- winget"
-          Get-Command winget -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-          "--- choco search"
-          choco search git-flow-next --exact 2>&1 | Select-Object -Last 3
+          $version = '2.1.0'
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+          $zip = "git-flow-next-v$version-windows-$arch.zip"
+          $dir = "$env:RUNNER_TEMP\git-flow-next"
+          Invoke-WebRequest "https://github.com/gittower/git-flow-next/releases/download/v$version/$zip" -OutFile "$env:RUNNER_TEMP\$zip"
+          Expand-Archive "$env:RUNNER_TEMP\$zip" -DestinationPath $dir -Force
+          $dir | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - run: git flow version
+      - name: Image, archive contents and cmd/bash
+        shell: pwsh
+        run: |
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion arch=$env:PROCESSOR_ARCHITECTURE"
+          Get-ChildItem "$env:RUNNER_TEMP\git-flow-next" | Format-Table Name, Length -AutoSize | Out-String
+          (Get-Command git-flow).Source
+          cmd /c "git flow version"
+          bash -lc "git flow version"
+      - name: Functional test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.name ci && git config --global user.email ci@example.com
+          git config --global init.defaultBranch main
+          cd "$RUNNER_TEMP" && mkdir repo && cd repo
+          git init -q && git commit -q --allow-empty -m init
+          git flow init --defaults
+          git flow feature start demo
+          git commit -q --allow-empty -m "feature work"
+          git flow feature finish demo
+          test "$(git branch --show-current)" = develop
+          git log --oneline develop | grep -q "feature work"
+          echo "functional test passed"
 
+  # Azure DevOps snippet body with AGENT_TEMPDIRECTORY set; the emitted prependpath is applied via GITHUB_PATH.
+  snippet-ado-emulated:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      AGENT_TEMPDIRECTORY: ${{ runner.temp }}
+    steps:
+      - name: ADO script body
+        shell: pwsh
+        run: |
+          $out = & {
+            $version = '2.1.0'
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+            $zip = "git-flow-next-v$version-windows-$arch.zip"
+            $dir = "$env:AGENT_TEMPDIRECTORY\git-flow-next"
+            Invoke-WebRequest "https://github.com/gittower/git-flow-next/releases/download/v$version/$zip" -OutFile "$env:AGENT_TEMPDIRECTORY\$zip"
+            Expand-Archive "$env:AGENT_TEMPDIRECTORY\$zip" -DestinationPath $dir -Force
+            Write-Host "##vso[task.prependpath]$dir"
+          } 6>&1
+          $out = $out | ForEach-Object { "$_" }
+          $out
+          $path = ($out | Select-String '^##vso\[task\.prependpath\](.+)$').Matches[0].Groups[1].Value
+          $path | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: script step (cmd)
+        shell: cmd
+        run: git flow version
+
+  # winget as the reporter wrote it; is git flow usable in a later step from pwsh and cmd?
   winget:
     strategy:
       fail-fast: false
@@ -42,65 +90,26 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $sw = [Diagnostics.Stopwatch]::StartNew()
           winget install --id GitTower.GitFlowNext --exact --silent --accept-package-agreements --accept-source-agreements
-          "winget exit: $LASTEXITCODE, took $([int]$sw.Elapsed.TotalSeconds)s"
-          winget list --id GitTower.GitFlowNext 2>&1
-
-      - name: Is winget's git-flow usable in the next step
+          "winget exit: $LASTEXITCODE"
+      - name: Later step (pwsh)
         continue-on-error: true
         shell: pwsh
-        run: |
-          Get-Command git-flow -All -ErrorAction SilentlyContinue | Format-Table Source -AutoSize | Out-String
-          git flow version
+        run: git flow version
+      - name: Later step (cmd)
+        continue-on-error: true
+        shell: cmd
+        run: git flow version
 
-  install:
+  # Parity: does any Linux or macOS image ship git-flow?
+  parity:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025, windows-11-arm]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Install git-flow-next from GitHub release
-        shell: pwsh
-        run: |
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          $version = '2.1.0'
-          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
-          $zip  = "git-flow-next-v$version-windows-$arch.zip"
-          $base = "https://github.com/gittower/git-flow-next/releases/download/v$version"
-          $dir  = Join-Path $env:RUNNER_TEMP 'git-flow-next'
-          Invoke-WebRequest "$base/$zip" -OutFile "$env:RUNNER_TEMP\$zip"
-          Invoke-WebRequest "$base/git-flow-next-v$version-checksums.txt" -OutFile "$env:RUNNER_TEMP\checksums.txt"
-          $expected = (Select-String -Path "$env:RUNNER_TEMP\checksums.txt" -SimpleMatch $zip).Line.Split(' ')[0]
-          "expected sha256: $expected"
-          if ((Get-FileHash "$env:RUNNER_TEMP\$zip" -Algorithm SHA256).Hash -ne $expected) { throw "Checksum mismatch for $zip" }
-          Expand-Archive "$env:RUNNER_TEMP\$zip" -DestinationPath $dir -Force
-          Get-ChildItem $dir -Recurse | Select-Object -ExpandProperty FullName
-          $exe = Get-ChildItem $dir -Recurse -Filter git-flow.exe | Select-Object -First 1
-          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "took $([int]$sw.Elapsed.TotalSeconds)s"
-
-      - name: Which git-flow wins (pwsh, bash, cmd)
-        shell: pwsh
-        run: |
-          Get-Command git-flow -All | Format-Table Source -AutoSize | Out-String
-          git flow version
-          bash -lc 'git flow version'
-          cmd /c "git flow version"
-
-      - name: Functional test
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global user.name ci
-          git config --global user.email ci@example.com
-          git config --global init.defaultBranch main
-          cd "$RUNNER_TEMP" && mkdir repo && cd repo
-          git init -q && git commit -q --allow-empty -m init
-          git flow init --defaults
-          git flow feature start demo
-          git commit -q --allow-empty -m "feature work"
-          git flow feature finish demo
-          git branch --list
-          git log --oneline --graph --all | head -10
+      - run: |
+          echo "$ImageOS $ImageVersion"
+          command -v git-flow || echo "git-flow: not on PATH"
+          git flow version || true
