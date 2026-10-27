@@ -1,0 +1,89 @@
+name: repro-longpath-15141
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [repro/15141-longpath]
+    paths: ['.github/workflows/repro-longpath-15141.yml']
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025-vs2026, windows-2025, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Environment info
+        run: |
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          "OS build: $($cv.CurrentBuild).$($cv.UBR)"
+          "LongPathsEnabled: $((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').LongPathsEnabled)"
+          "git core.longpaths (system): $(git config --system --get core.longpaths)"
+          "NETFX release: $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full').Release)"
+          Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5 | Format-Table HotFixID, Description, InstalledOn -AutoSize | Out-String
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -format value -property catalog_productDisplayVersion
+          $vs = & $vswhere -latest -property installationPath
+          "VS path: $vs"
+          "VS_PATH=$vs" >> $env:GITHUB_ENV
+          foreach ($exe in "$vs\MSBuild\Current\Bin\MSBuild.exe", "$vs\MSBuild\Current\Bin\amd64\MSBuild.exe") {
+            "--- $exe"
+            & $exe -version -nologo
+            ""
+            Select-String -Path "$exe.config" -Pattern 'AppContextSwitchOverrides' | ForEach-Object { $_.Line.Trim() }
+          }
+          "--- dotnet: $(dotnet --version)"
+
+      - name: Create long-path project
+        run: |
+          $proj = @'
+          <Project DefaultTargets="Repro" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+            <PropertyGroup>
+              <Base>$(MSBuildProjectDirectory)\out-$(Variant)</Base>
+              <LongDir>$(Base)\pkg\dddddddddddddddddddddddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddddddddddddddddddddddd</LongDir>
+              <LongFile>$(LongDir)\ffffffffffffffffffffffffffffffffffffffffffffffff.txt</LongFile>
+            </PropertyGroup>
+            <ItemGroup>
+              <Src Include="$(MSBuildProjectFullPath)" />
+            </ItemGroup>
+            <Target Name="Info">
+              <Message Importance="High" Text="MSBuild $(MSBuildVersion) | 64-bit: $([System.Environment]::Is64BitProcess) | target length: $([System.String]::Copy('$(LongFile)').Length)" />
+            </Target>
+            <Target Name="Repro" DependsOnTargets="Info">
+              <MakeDir Directories="$(LongDir)" />
+              <Copy SourceFiles="@(Src)" DestinationFiles="$(LongFile)" ContinueOnError="ErrorAndContinue" />
+              <WriteLinesToFile File="$(LongFile).w.txt" Lines="ok" Overwrite="true" ContinueOnError="ErrorAndContinue" />
+              <Copy SourceFiles="$(LongFile)" DestinationFolder="$(Base)\back" ContinueOnError="ErrorAndContinue" />
+            </Target>
+          </Project>
+          '@
+          New-Item -ItemType Directory -Force repro | Out-Null
+          Set-Content -Path repro\LongPath.proj -Value $proj -Encoding utf8
+
+      - name: Run MSBuild variants
+        run: |
+          $x86 = "$env:VS_PATH\MSBuild\Current\Bin\MSBuild.exe"
+          $x64 = "$env:VS_PATH\MSBuild\Current\Bin\amd64\MSBuild.exe"
+          $proj = (Resolve-Path repro\LongPath.proj).Path
+          $results = @()
+          function Run($name, [scriptblock]$cmd) {
+            "==================== $name"
+            & $cmd 2>&1 | Out-Host
+            $script:results += [pscustomobject]@{ Variant = $name; ExitCode = $LASTEXITCODE }
+          }
+          Run 'x86 MSBuild.exe'                 { & $x86 $proj -nologo -nr:false -v:m -p:Variant=x86 }
+          Run 'amd64 MSBuild.exe'               { & $x64 $proj -nologo -nr:false -v:m -p:Variant=x64 }
+          Run 'dotnet msbuild'                  { dotnet msbuild $proj -nologo -nr:false -v:m -p:Variant=dotnet }
+          $env:COMPLUS_ZapDisable = '1'
+          Run 'x86 MSBuild.exe, ZapDisable=1'   { & $x86 $proj -nologo -nr:false -v:m -p:Variant=x86zap }
+          Remove-Item Env:COMPLUS_ZapDisable
+          ""
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          $results | Format-Table -AutoSize | Out-String
+          exit 0
