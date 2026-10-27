@@ -1,0 +1,68 @@
+name: Validate abidiff riscv naming 15071
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runner ubuntu-24.04
+            runs-on: ubuntu-24.04
+            container: ''
+            expect_arch: elf-unknown-arch-value-243
+            expect_pass: 'true'
+          - name: runner ubuntu-26.04
+            runs-on: ubuntu-26.04
+            container: ''
+            expect_arch: elf-riscv
+            expect_pass: 'false'
+          - name: plain ubuntu:26.04 container
+            runs-on: ubuntu-24.04
+            container: ubuntu:26.04
+            expect_arch: elf-riscv
+            expect_pass: 'false'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install packages
+        run: |
+          SUDO=$( [ "$(id -u)" = 0 ] && echo "" || echo sudo )
+          $SUDO apt-get update
+          DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y build-essential crossbuild-essential-riscv64 abigail-tools git
+          grep PRETTY_NAME /etc/os-release
+          abidw --version
+          apt-cache policy abigail-tools | head -8
+
+      - name: Checkout zlib-ng
+        uses: actions/checkout@v4
+        with:
+          repository: zlib-ng/zlib-ng
+          ref: develop
+
+      - name: Run ABI check
+        id: abi
+        shell: bash
+        run: |
+          set +e
+          CC=riscv64-linux-gnu-gcc CHOST=riscv64-linux-gnu sh test/abicheck.sh > abicheck.log 2>&1
+          rc=$?
+          tail -15 abicheck.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          arch=$(head -1 btmp2/zlib-ng-built.abi | grep -o "architecture='[^']*'" | cut -d"'" -f2)
+          echo "Freshly built ABI architecture: $arch"
+          echo "Stored ABI architecture: $(head -1 test/abi/zlib-ng-f75c6856c32a0ade1f33e266fb370bac92d15fac-riscv64-unknown-linux-gnu.abi | grep -o "architecture='[^']*'")"
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+
+      - name: Assert expectations
+        shell: bash
+        run: |
+          ok=true
+          [ "${{ steps.abi.outputs.arch }}" = "${{ matrix.expect_arch }}" ] || { echo "arch mismatch: got ${{ steps.abi.outputs.arch }}"; ok=false; }
+          if [ "${{ matrix.expect_pass }}" = true ]; then [ "${{ steps.abi.outputs.rc }}" = 0 ] || { echo "expected abicheck PASS"; ok=false; }
+          else [ "${{ steps.abi.outputs.rc }}" != 0 ] || { echo "expected abicheck FAIL"; ok=false; }; fi
+          $ok && echo "Expectations hold"
+          $ok
