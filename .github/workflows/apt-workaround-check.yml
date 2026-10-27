@@ -11,20 +11,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - name: Workaround on a simulated trickling mirror
+      - name: Download-only workaround on a simulated trickling mirror
         run: |
           pkgs="pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev at-spi2-core python3-pyatspi sway grim"
           sudo apt-get update
-          # Dl-Limit caps apt at 80 kB/s, like the slow westus3 runs; Timeout 15 never fires on it.
           start=$(date +%s)
-          if ! timeout 90 sudo apt-get install --yes -o Acquire::http::Dl-Limit=80 $pkgs > /tmp/first.log 2>&1; then
-            echo "first attempt killed after $(( $(date +%s) - start ))s; $(grep -c '^Get:' /tmp/first.log) Get lines, $(grep -cE '^(Err|Ign):' /tmp/first.log) Err/Ign"
+          # Dl-Limit simulates the slow westus3 mirror on the first attempt only.
+          if ! timeout 120 sudo apt-get install --yes --download-only -o Acquire::http::Dl-Limit=80 $pkgs > /tmp/first.log 2>&1; then
+            echo "download attempt killed after $(( $(date +%s) - start ))s; $(grep -c '^Get:' /tmp/first.log) Get lines"
             sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
-            start=$(date +%s)
-            sudo apt-get install --yes $pkgs > /tmp/second.log 2>&1
-            echo "retry finished in $(( $(date +%s) - start ))s"
+            sudo apt-get install --yes --download-only $pkgs > /tmp/second.log 2>&1
             grep -E '^Fetched' /tmp/second.log
             echo 'hosts used by retry:'; grep '^Get:' /tmp/second.log | grep -oE 'https?://[^ ]+' | sort | uniq -c
-          else
-            echo "first attempt finished inside 90s (unexpected)"
           fi
+          start=$(date +%s)
+          sudo apt-get install --yes $pkgs > /tmp/install.log 2>&1
+          echo "install from cache took $(( $(date +%s) - start ))s; $(grep -c '^Get:' /tmp/install.log) Get lines"
+          dpkg -s libwebkitgtk-6.0-dev sway grim | grep -E '^(Package|Status)'
