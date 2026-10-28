@@ -1,0 +1,58 @@
+name: Validate reply claims 15172
+
+on:
+  workflow_dispatch:
+
+jobs:
+  curl:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, macos-15]
+        n: [1, 2, 3]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Redirect check
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          curl -sI https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/0.88.0/react-native-artifacts-0.88.0-reactnative-dependencies-release.tar.gz | grep -i -E '^(HTTP|location|server)'
+
+      - name: Client snippet (verbatim)
+        run: |
+          curl -sSL -o /dev/null -v --max-time 120 \
+            -w "%{http_code} %{http_version} ip=%{remote_ip} speed=%{speed_download}B/s\n" \
+            https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz 2>&1 \
+            | grep -i -E '^< (cf-ray|server)|^\* +(Connected|Trying)|ip='
+
+      - name: Reporter repro x3
+        run: |
+          for i in 1 2 3; do
+            for url in \
+              https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/0.88.0/react-native-artifacts-0.88.0-reactnative-dependencies-release.tar.gz \
+              https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz
+            do
+              curl -L -o /dev/null --max-time 300 -w "%{http_code} %{size_download} bytes, %{speed_download} B/s\n" "$url" || true
+            done
+          done
+
+  pod-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: RN 0.88 init
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          npx --yes @react-native-community/cli@latest init Repro --version 0.88.0 --skip-git-init --install-pods false
+      - name: pod install
+        working-directory: Repro/ios
+        run: |
+          bundle install
+          start=$(date +%s)
+          bundle exec pod install > pod.log 2>&1; rc=$?
+          echo "pod install exit=$rc in $(( $(date +%s) - start ))s"
+          grep -i -E 'hermes|ReactNativeDependencies|download|curl|error|Pod installation complete' pod.log | head -40
+          exit $rc
