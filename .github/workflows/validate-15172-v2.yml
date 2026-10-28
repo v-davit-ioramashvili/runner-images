@@ -52,7 +52,7 @@ jobs:
         run: |
           bundle install
           start=$(date +%s)
-          bundle exec pod install > pod.log 2>&1; rc=$?
+          rc=0; bundle exec pod install > pod.log 2>&1 || rc=$?
           echo "pod install exit=$rc in $(( $(date +%s) - start ))s"
           grep -i -E 'hermes|ReactNativeDependencies|download|curl|error|Pod installation complete' pod.log | head -40
           exit $rc
