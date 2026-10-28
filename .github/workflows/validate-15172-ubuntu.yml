@@ -1,0 +1,33 @@
+name: Ubuntu Maven download stall 15172
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hosts:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
+        n: [1, 2, 3]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Same-machine host comparison
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          mvn=https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.0.0/kotlin-compiler-embeddable-2.0.0.jar
+          rn=https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz
+          rn2=https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/0.88.0/react-native-artifacts-0.88.0-reactnative-dependencies-release.tar.gz
+          cf=https://speed.cloudflare.com/__down?bytes=30000000
+          gg=https://dl.google.com/go/go1.23.0.darwin-arm64.tar.gz
+          for i in 1 2 3 4; do
+            for t in "mvn:$mvn" "mvn-h1:$mvn" "rn:$rn" "rn2:$rn2" "cf:$cf" "gg:$gg"; do
+              name=${t%%:*}; url=${t#*:}; flags=""
+              [ "$name" = "mvn-h1" ] && flags="--http1.1"
+              curl -sS -L -o /dev/null -D hdr.txt --max-time 60 $flags \
+                -w "$i $name %{http_code} h%{http_version} ip=%{remote_ip} size=%{size_download} speed=%{speed_download}B/s" "$url" 2>/dev/null || true
+              printf ' ray=%s cache=%s\n' \
+                "$(grep -i '^cf-ray:' hdr.txt | tail -1 | tr -d '\r' | awk '{print $2}')" \
+                "$(grep -i '^cf-cache-status:' hdr.txt | tail -1 | tr -d '\r' | awk '{print $2}')"
+            done
+          done
