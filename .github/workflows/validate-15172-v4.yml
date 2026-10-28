@@ -1,0 +1,33 @@
+name: Validate RN cache reuse 15172
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rn-cache:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Edge check
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          curl -sSI https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz | grep -i -E '^(cf-ray|cf-cache-status):'
+      - name: RN 0.88 init
+        run: npx --yes @react-native-community/cli@latest init Repro --version 0.88.0 --skip-git-init --install-pods false
+      - name: pod install, then again with Pods removed
+        working-directory: Repro/ios
+        run: |
+          bundle install > /dev/null
+          for pass in first second; do
+            [ "$pass" = "second" ] && rm -rf Pods Podfile.lock
+            start=$(date +%s); rc=0
+            bundle exec pod install > $pass.log 2>&1 || rc=$?
+            echo "== $pass: exit=$rc in $(( $(date +%s) - start ))s, cache misses=$(grep -c 'Cache miss' $pass.log)"
+            grep -E '\[(Hermes|ReactNativeDependencies|ReactNativeCore)\]' $pass.log | grep -i -E 'cache|download|fail|error|skipping' | cut -c1-200 | head -12
+            [ $rc -ne 0 ] && { tail -30 $pass.log; exit $rc; }
+          done
+          ls -la ~/Library/Caches/ReactNative
