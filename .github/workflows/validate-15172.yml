@@ -1,0 +1,63 @@
+name: Repro Maven download stall 15172
+
+on:
+  workflow_dispatch:
+
+jobs:
+  netconfig:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Network config
+        shell: bash
+        run: |
+          set +e
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"; sw_vers
+          echo "--- proxy env";        env | grep -i -E '_proxy|no_proxy' || echo "none"
+          echo "--- scutil --proxy";   scutil --proxy
+          echo "--- curlrc/netrc";     ls -la ~/.curlrc ~/.netrc /etc/curlrc 2>&1
+          echo "--- curl";             which -a curl; curl --version
+          echo "--- interfaces/MTU";   ifconfig | grep -E '^[a-z]|mtu|inet6? '
+          echo "--- default routes";   netstat -rn -f inet | grep default; netstat -rn -f inet6 | grep default
+          echo "--- DNS";              scutil --dns | grep -E 'nameserver|resolver #' | head -20
+          echo "--- /etc/hosts";       grep -v '^#' /etc/hosts
+          echo "--- tcp sysctls";      sysctl net.inet.tcp.mssdflt net.inet.tcp.ecn_initiate_out net.inet.tcp.ecn_negotiate_in net.inet.tcp.sack net.inet.tcp.rfc1323 net.inet.tcp.recvspace net.inet.tcp.sendspace net.inet.tcp.autorcvbufmax net.inet.tcp.delayed_ack net.inet.tcp.tso net.inet.tcp.pmtud_blackhole_detection
+          echo "--- pf";               sudo pfctl -s info 2>&1 | head -5; sudo pfctl -s rules 2>&1 | head -20
+          echo "--- network extensions"; systemextensionsctl list 2>&1 | head -20
+          for h in repo1.maven.org repo.reactnative.dev speed.cloudflare.com dl.google.com; do
+            echo "--- $h A/AAAA"; dig +short A $h | tail -2; dig +short AAAA $h | tail -2
+          done
+          echo "--- PMTU (DF set) to repo1.maven.org"
+          for s in 1472 1452 1400 1200; do ping -D -c 2 -t 5 -s $s repo1.maven.org >/dev/null 2>&1 && echo "$s ok" || echo "$s FAIL"; done
+
+  download:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, macos-15, macos-26]
+        target:
+          - name: maven
+            url: https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/0.88.0/react-native-artifacts-0.88.0-reactnative-dependencies-release.tar.gz
+          - name: reactnative
+            url: https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz
+          - name: cloudflare
+            url: https://speed.cloudflare.com/__down?bytes=30000000
+          - name: google
+            url: https://dl.google.com/go/go1.23.0.darwin-arm64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: ${{ matrix.target.name }} - HTTP/IP variants
+        shell: bash
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          fmt='%{http_code} %{http_version} ip=%{remote_ip} size=%{size_download} speed=%{speed_download}B/s connect=%{time_connect}s ttfb=%{time_starttransfer}s total=%{time_total}s\n'
+          curl -sI "${{ matrix.target.url }}" | grep -i -E '^(server|via|x-served-by|x-cache|cf-ray|age|content-length):' || true
+          for variant in "default:" "http1.1:--http1.1" "http2:--http2" "ipv4:-4" "ipv6:-6" "ipv4-http1.1:-4 --http1.1"; do
+            label=${variant%%:*}; flags=${variant#*:}
+            printf '%-14s ' "$label"
+            curl -sS -L -o /dev/null --max-time 120 $flags -w "$fmt" "${{ matrix.target.url }}" 2>&1 | tr '\n' ' '
+            echo
+          done
