@@ -1,0 +1,54 @@
+name: Ubuntu idle connection reuse check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  idle:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-22.04, ubuntu-26.04]
+        n: [1, 2]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Maven transport on this image
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          mvn -v | head -3
+          ls "$(dirname "$(readlink -f "$(which mvn)")")/../lib" | grep -i -E 'resolver-transport|wagon-http' || true
+          mvn -B -X -q dependency:get -Dartifact=junit:junit:4.13.2 -Dtransitive=false 2>&1 | grep -i -E 'transporter|Using connector|HttpClient|JdkTransport|ApacheTransport' | sort -u | head -8
+      - name: Idle kept-alive connection reuse
+        run: |
+          cat > idle_reuse.py <<'PY'
+          import http.client, socket, ssl, sys, threading, time
+          
+          HOST = "repo1.maven.org"
+          PATH = "/maven2/org/apache/maven/apache-maven/maven-metadata.xml"
+          IDLES = [int(x) for x in sys.argv[1:]] or [30, 120, 230, 260, 291, 330]
+          results = {}
+          
+          def probe(idle):
+              conn = http.client.HTTPSConnection(HOST, 443, timeout=60, context=ssl.create_default_context())
+              t = time.time()
+              try:
+                  conn.request("GET", PATH, headers={"Connection": "keep-alive"})
+                  r = conn.getresponse(); r.read()
+                  local = conn.sock.getsockname()
+                  time.sleep(idle)
+                  t = time.time()
+                  conn.request("GET", PATH, headers={"Connection": "keep-alive"})
+                  r = conn.getresponse(); r.read()
+                  results[idle] = f"reused OK ({r.status}) in {time.time() - t:.1f}s, local port {local[1]}"
+              except Exception as e:
+                  results[idle] = f"{type(e).__name__}: {e} after {time.time() - t:.1f}s"
+              finally:
+                  conn.close()
+          
+          threads = [threading.Thread(target=probe, args=(i,)) for i in IDLES]
+          for th in threads: th.start()
+          for th in threads: th.join()
+          for i in IDLES:
+              print(f"idle {i:>4}s -> {results[i]}")
+          PY
+          python3 idle_reuse.py
