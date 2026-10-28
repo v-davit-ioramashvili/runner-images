@@ -1,0 +1,26 @@
+name: Ubuntu TCP reset settings check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
+        n: [1, 2]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Settings
+        run: |
+          set +e
+          echo "ImageVersion=$ImageVersion kernel=$(uname -r)"
+          echo "--- udev rule"; cat /etc/udev/rules.d/50-netfilter.rules
+          echo "--- nf_conntrack loaded"; lsmod | grep -E '^nf_conntrack ' || echo "not loaded"
+          echo "--- values"
+          sysctl net.netfilter.nf_conntrack_tcp_be_liberal net.netfilter.nf_conntrack_tcp_timeout_established \
+            net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes \
+            net.ipv4.tcp_mtu_probing net.ipv4.tcp_ecn net.core.default_qdisc net.ipv4.tcp_congestion_control
+          echo "--- eth0 MTU"; ip -o link show eth0 | grep -o 'mtu [0-9]*'
+          echo "--- INVALID drop rules"; sudo iptables -S | grep -i -E 'invalid|ctstate' || echo "none"
