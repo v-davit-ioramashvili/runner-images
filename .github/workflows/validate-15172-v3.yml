@@ -1,0 +1,50 @@
+name: Isolate download stall 15172
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hosts:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, macos-15]
+        n: [1, 2, 3, 4]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Same-machine host comparison
+        run: |
+          echo "ImageVersion=$ImageVersion"
+          rn=https://repo.reactnative.dev/maven2/com/facebook/hermes/hermes-ios/260318099.0.4/hermes-ios-260318099.0.4-hermes-ios-release.tar.gz
+          rn2=https://repo.reactnative.dev/maven2/com/facebook/react/react-native-artifacts/0.88.0/react-native-artifacts-0.88.0-reactnative-dependencies-release.tar.gz
+          cf=https://speed.cloudflare.com/__down?bytes=30000000
+          gg=https://dl.google.com/go/go1.23.0.darwin-arm64.tar.gz
+          for i in 1 2 3 4; do
+            for t in "rn:$rn" "rn2:$rn2" "rn-h1:$rn" "cf:$cf" "gg:$gg"; do
+              name=${t%%:*}; url=${t#*:}; flags=""
+              [ "$name" = "rn-h1" ] && flags="--http1.1"
+              curl -sS -o /dev/null -D hdr.txt --max-time 60 $flags \
+                -w "$i $name %{http_code} h%{http_version} ip=%{remote_ip} size=%{size_download} speed=%{speed_download}B/s" "$url" 2>/dev/null || true
+              printf ' ray=%s cache=%s age=%s\n' \
+                "$(grep -i '^cf-ray:' hdr.txt | tr -d '\r' | awk '{print $2}')" \
+                "$(grep -i '^cf-cache-status:' hdr.txt | tr -d '\r' | awk '{print $2}')" \
+                "$(grep -i '^age:' hdr.txt | tr -d '\r' | awk '{print $2}')"
+            done
+          done
+
+  rn-cache:
+    runs-on: xcode-27
+    steps:
+      - name: RN 0.88 init
+        run: npx --yes @react-native-community/cli@latest init Repro --version 0.88.0 --skip-git-init --install-pods false
+      - name: pod install, then again with Pods removed
+        working-directory: Repro/ios
+        run: |
+          bundle install
+          bundle exec pod install > first.log 2>&1
+          echo "first: $(grep -c 'Cache miss' first.log) cache misses"
+          ls -la ~/Library/Caches/ReactNative
+          rm -rf Pods Podfile.lock
+          bundle exec pod install > second.log 2>&1
+          echo "second: $(grep -c 'Cache miss' second.log) cache misses"
+          grep -i -E 'cache|Skipping download' second.log | head -20
