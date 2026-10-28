@@ -1,0 +1,68 @@
+name: Maven 3.9 vs 3.10 idle reset on same image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  maven:
+    strategy:
+      fail-fast: false
+      matrix:
+        maven: ["3.9.16", "image"]
+        n: [1, 2]
+        ttl: [default]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create reactor that idles 290s between downloads
+        run: |
+          mkdir -p repro/a repro/b/src/main/java/b && cd repro
+          cat > pom.xml <<'POM'
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>repro</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging>
+            <modules><module>a</module><module>b</module></modules>
+          </project>
+          POM
+          cat > a/pom.xml <<'POM'
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <parent><groupId>repro</groupId><artifactId>root</artifactId><version>1</version></parent>
+            <artifactId>a</artifactId><packaging>pom</packaging>
+            <build><plugins><plugin>
+              <groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version>
+              <executions><execution><id>idle</id><phase>validate</phase><goals><goal>exec</goal></goals>
+                <configuration><executable>sleep</executable><arguments><argument>290</argument></arguments></configuration>
+              </execution></executions>
+            </plugin></plugins></build>
+          </project>
+          POM
+          cat > b/pom.xml <<'POM'
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <parent><groupId>repro</groupId><artifactId>root</artifactId><version>1</version></parent>
+            <artifactId>b</artifactId>
+            <properties><maven.compiler.release>17</maven.compiler.release></properties>
+            <dependencies><dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>33.3.1-jre</version></dependency></dependencies>
+          </project>
+          POM
+          echo 'package b; public class B {}' > b/src/main/java/b/B.java
+      - name: Pick Maven
+        run: |
+          if [ "${{ matrix.maven }}" != "image" ]; then
+            curl -sSfL https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${{ matrix.maven }}/apache-maven-${{ matrix.maven }}-bin.tar.gz | tar xz -C "$RUNNER_TEMP"
+            echo "$RUNNER_TEMP/apache-maven-${{ matrix.maven }}/bin" >> "$GITHUB_PATH"
+          fi
+      - name: mvn package (maven=${{ matrix.maven }})
+        working-directory: repro
+        run: |
+          echo "Region: $(curl -s -H Metadata:true --max-time 3 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || echo unknown)"
+          echo "ImageVersion=$ImageVersion"; mvn -v | head -1
+          extra=""
+          [ "${{ matrix.ttl }}" != "default" ] && extra="-Daether.transport.http.connectionMaxTtl=${{ matrix.ttl }} -Daether.connector.http.connectionMaxTtl=${{ matrix.ttl }}"
+          rc=0; start=$(date +%s)
+          mvn -B -Dmaven.repo.local="$RUNNER_TEMP/m2" $extra -Dorg.slf4j.simpleLogger.log.org.apache.http=debug -Dorg.slf4j.simpleLogger.log.org.eclipse.aether.transport=debug package > build.log 2>&1 || rc=$?
+          echo "mvn exit=$rc in $(( $(date +%s) - start ))s"
+          echo "--- errors/retries"
+          grep -i -E 'connection reset|SSLException|NoHttpResponse|Broken pipe|I/O exception|retrying request|stale|Could not transfer|BUILD (SUCCESS|FAILURE)' build.log | sort | uniq -c | sort -rn | head -15
+          echo "--- reactor"
+          grep -E '^\[INFO\] (root|a|b) .*(SUCCESS|FAILURE)' build.log
