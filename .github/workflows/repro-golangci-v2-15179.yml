@@ -1,0 +1,44 @@
+name: Validate golangci-lint v2 on Go 1.26 - issue 15179
+
+# Follow-up to repro-golangci-15179.yml: v1.64.8 (built with go1.24) runs the
+# 26.04 VM out of memory when linting with the image default Go 1.26. Check
+# whether a current v2 release (built with a newer Go) stays within limits.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout target repo
+        run: |
+          git clone -q --depth 1 --branch v3.2.1 https://github.com/prometheus/prometheus target
+          go version
+
+      - name: Install latest golangci-lint v2
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b "$HOME/bin"
+          "$HOME/bin/golangci-lint" version
+
+      - name: Run golangci-lint v2 with monitor
+        working-directory: target
+        env:
+          GOMAXPROCS: '2'
+          GOFLAGS: '-p=2'
+        run: |
+          "$HOME/bin/golangci-lint" migrate --skip-validation || true
+          (while true; do
+             echo "MON $(date +%T) $(free -m | awk '/Mem:/{printf "mem used=%s avail=%s",$3,$7} /Swap:/{printf " swap used=%s/%s",$3,$2}')"
+             ps -eo rss,comm --sort=-rss | awk 'NR==2{printf "  %s %dM\n",$2,$1/1024}'
+             sleep 10
+           done) &
+          MON=$!
+          set +e
+          /usr/bin/time -v "$HOME/bin/golangci-lint" run --concurrency 2 --timeout 25m ./... > lint.out 2> time.out
+          rc=$?
+          kill $MON
+          echo "golangci-lint exit=$rc"
+          tail -15 lint.out
+          grep -E 'Maximum resident|Elapsed' time.out
