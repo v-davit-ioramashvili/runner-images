@@ -1,0 +1,147 @@
+name: validate-certpem-15186
+on:
+  push:
+    branches: [validate/15186-certpem]
+  workflow_dispatch:
+
+jobs:
+  certpem:
+    name: certpem (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, macos-15-intel]
+    steps:
+      - name: Inventory of /etc/ssl/cert.pem
+        run: |
+          set +e
+          sw_vers; echo "ImageVersion=$ImageVersion ImageOS=$ImageOS"
+          csrutil status
+          ls -ld /etc /private/etc/ssl
+          ls -lO /private/etc/ssl/ /private/etc/ssl/cert.pem
+          xattr -l /private/etc/ssl/cert.pem
+          head -n 1 /etc/ssl/cert.pem
+          shasum -a 256 /etc/ssl/cert.pem
+          echo "certs: $(grep -c 'BEGIN CERTIFICATE' /etc/ssl/cert.pem)"
+          echo "--- owning package"
+          pkgutil --file-info /private/etc/ssl/cert.pem
+          echo "--- SIP rootless.conf entries for ssl"
+          grep -n -i ssl /System/Library/Sandbox/rootless.conf
+          echo "--- volume"
+          df -h /private/etc/ssl/cert.pem
+          echo "--- unprivileged write attempt"
+          ( echo test >> /etc/ssl/cert.pem ) && echo "UNPRIV WRITE OK" || echo "unpriv write denied (expected)"
+          echo "--- eMudhra roots in bundle"
+          grep -E '^=== .*(emSign ECC Root CA - G3|AAA Certificate Services)' /etc/ssl/cert.pem
+          echo "--- same roots in SystemRootCertificates keychain"
+          security find-certificate -a -c "emSign ECC Root CA - G3" /System/Library/Keychains/SystemRootCertificates.keychain | grep -m1 labl
+          security find-certificate -a -c "AAA Certificate Services" /System/Library/Keychains/SystemRootCertificates.keychain | grep -m1 labl
+
+      - name: Which CA file each client uses
+        run: |
+          set +e
+          echo "--- curl"; which -a curl; /usr/bin/curl -V | head -1; curl -V | head -1
+          /usr/bin/curl -sv https://github.com -o /dev/null 2>&1 | grep -iE 'CAfile|CApath|SSL connection'
+          echo "--- openssl"; /usr/bin/openssl version -d; which -a openssl; openssl version -d
+          echo "--- python"; which -a python3
+          /usr/bin/python3 -c 'import ssl,sys; print(sys.executable, ssl.OPENSSL_VERSION, ssl.get_default_verify_paths())'
+          python3 -c 'import ssl,sys; print(sys.executable, ssl.OPENSSL_VERSION, ssl.get_default_verify_paths())'
+          echo "--- ruby"; which -a ruby
+          /usr/bin/ruby -ropenssl -e 'puts RUBY_VERSION, OpenSSL::OPENSSL_LIBRARY_VERSION, OpenSSL::X509::DEFAULT_CERT_FILE'
+          ruby -ropenssl -e 'puts RUBY_VERSION, OpenSSL::OPENSSL_LIBRARY_VERSION, OpenSSL::X509::DEFAULT_CERT_FILE'
+          echo "--- git"; which -a git; git --version; /usr/bin/git --version
+          git config --show-origin --get-all http.sslcainfo; git config --show-origin --get-all http.sslbackend
+          echo "--- node"; which node; node -p 'process.versions.openssl'
+          echo "--- homebrew"; brew list --versions curl openssl@3 ca-certificates
+          ls -l "$(brew --prefix)/etc/openssl@3/cert.pem" "$(brew --prefix)/etc/ca-certificates/cert.pem"
+          ls -l "$(brew --prefix)/opt/ca-certificates/share/ca-certificates/cacert.pem"
+
+      - name: Write probe helpers
+        run: |
+          cat > "$RUNNER_TEMP/probe.sh" <<'EOF'
+          EMS=https://dv-g3b-emudhra.we-have-a-problem.com/
+          AAA=https://dv-g3b-aaa-emudhra.we-have-a-problem.com/
+          CTL=https://github.com/
+          GIT_EMS=https://git-emudhra.we-have-a-problem.com/check.git
+          GIT_CTL=https://github.com/octocat/Hello-World.git
+          BREW=$(brew --prefix)
+          command -v timeout >/dev/null || timeout() { local s=$1; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
+          probe() {
+            local name=$1 tag=$2; shift 2
+            local out r
+            if out=$(timeout 40 "$@" 2>&1 </dev/null); then r=ACCEPT; else r=REJECT; fi
+            printf '%-14s | %-24s | %-4s | %s\n' "$PHASE" "$name" "$tag" "$r" | tee -a "$RUNNER_TEMP/results.txt"
+            [ "$r" = REJECT ] && printf '    %s\n' "$(echo "$out" | grep -v '^\s*$' | tail -1 | cut -c1-160)"
+            return 0
+          }
+          http_probe() {
+            local tag=$1 url=$2
+            probe "/usr/bin/curl" $tag /usr/bin/curl -sS -o /dev/null --max-time 30 "$url"
+            [ "$(command -v curl)" != /usr/bin/curl ] && probe "PATH curl ($(command -v curl))" $tag curl -sS -o /dev/null --max-time 30 "$url"
+            [ -x "$BREW/opt/curl/bin/curl" ] && probe "brew curl" $tag "$BREW/opt/curl/bin/curl" -sS -o /dev/null --max-time 30 "$url"
+            local host=${url#https://}; host=${host%/}
+            probe "/usr/bin/openssl s_client" $tag sh -c "echo | /usr/bin/openssl s_client -connect $host:443 -servername $host -verify_return_error >/dev/null"
+            probe "brew openssl@3 s_client" $tag sh -c "echo | $BREW/opt/openssl@3/bin/openssl s_client -connect $host:443 -servername $host -verify_return_error >/dev/null"
+            probe "/usr/bin/python3" $tag /usr/bin/python3 -c 'import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=30)' "$url"
+            probe "PATH python3" $tag python3 -c 'import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=30)' "$url"
+            probe "/usr/bin/ruby" $tag /usr/bin/ruby -rnet/http -e 'Net::HTTP.get_response(URI(ARGV[0]))' "$url"
+            probe "PATH ruby" $tag ruby -rnet/http -e 'Net::HTTP.get_response(URI(ARGV[0]))' "$url"
+            probe "/usr/bin/perl HTTP::Tiny" $tag /usr/bin/perl -MHTTP::Tiny -e 'my $r=HTTP::Tiny->new(verify_SSL=>1)->get($ARGV[0]); die "$r->{status} $r->{content}\n" if $r->{status}==599; exit 0' "$url"
+            probe "node" $tag node -e 'require("https").get(process.argv[1],r=>process.exit(0)).on("error",e=>{console.error(e.message);process.exit(1)})' "$url"
+            probe "URLSession (swift)" $tag "$RUNNER_TEMP/urlsession" "$url"
+          }
+          run_all() {
+            http_probe EMS "$EMS"; http_probe AAA "$AAA"; http_probe CTL "$CTL"
+            probe "/usr/bin/git" EMS /usr/bin/git ls-remote "$GIT_EMS"
+            probe "/usr/bin/git" CTL /usr/bin/git ls-remote "$GIT_CTL"
+            [ "$(command -v git)" != /usr/bin/git ] && probe "PATH git ($(command -v git))" EMS git ls-remote "$GIT_EMS"
+            [ "$(command -v git)" != /usr/bin/git ] && probe "PATH git ($(command -v git))" CTL git ls-remote "$GIT_CTL"
+            return 0
+          }
+          EOF
+          cat > "$RUNNER_TEMP/urlsession.swift" <<'EOF'
+          import Foundation
+          let url = URL(string: CommandLine.arguments[1])!
+          let sem = DispatchSemaphore(value: 0)
+          var code: Int32 = 1
+          URLSession.shared.dataTask(with: url) { _, resp, err in
+            if let err = err { FileHandle.standardError.write("\(err.localizedDescription)\n".data(using: .utf8)!) } else { code = 0 }
+            sem.signal()
+          }.resume()
+          sem.wait()
+          exit(code)
+          EOF
+          swiftc -O -o "$RUNNER_TEMP/urlsession" "$RUNNER_TEMP/urlsession.swift"
+
+      - name: Phase A - stock image
+        run: |
+          set +e; source "$RUNNER_TEMP/probe.sh"; PHASE=A-stock; run_all
+
+      - name: Phase B - Apple steps from support.apple.com/149555 (same as PR 15180)
+        run: |
+          set +e
+          [ -e /etc/ssl/cert.pem.orig ] || sudo cp -p /etc/ssl/cert.pem /etc/ssl/cert.pem.orig
+          for s in '=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' \
+                   '=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services'; do
+            t=$(mktemp) && awk -v s="$s" '/^(===|###) /{skip=0} $0==s{skip=1} !skip' /etc/ssl/cert.pem > "$t" && [ -s "$t" ] && sudo install -m 0644 -o root -g wheel "$t" /etc/ssl/cert.pem; echo "install rc=$?"; rm -f "$t"
+          done
+          ls -lO /etc/ssl/cert.pem; echo "certs now: $(grep -c 'BEGIN CERTIFICATE' /etc/ssl/cert.pem)"
+          openssl crl2pkcs7 -nocrl -certfile /etc/ssl/cert.pem | openssl pkcs7 -print_certs -noout | grep -E 'emSign ECC Root CA - G3|AAA Certificate Services' || echo "both roots gone"
+          source "$RUNNER_TEMP/probe.sh"; PHASE=B-apple-steps; run_all
+
+      - name: Phase C - restore stock file, reporter workaround (env vars to Homebrew Mozilla bundle)
+        run: |
+          set +e
+          sudo install -m 0644 -o root -g wheel /etc/ssl/cert.pem.orig /etc/ssl/cert.pem
+          B="$(brew --prefix)/opt/ca-certificates/share/ca-certificates/cacert.pem"
+          brew list --versions ca-certificates
+          echo "eMudhra roots in Homebrew cacert.pem: $(grep -cE 'emSign ECC Root CA - G3|AAA Certificate Services' "$B")"
+          export CURL_CA_BUNDLE="$B" SSL_CERT_FILE="$B"
+          source "$RUNNER_TEMP/probe.sh"; PHASE=C-env-workaround; run_all
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; cat "$RUNNER_TEMP/results.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/results.txt"
