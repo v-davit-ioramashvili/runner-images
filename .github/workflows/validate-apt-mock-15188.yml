@@ -1,0 +1,95 @@
+name: Validate apt mock exit codes 15188
+
+on:
+  push:
+    branches: [validate/15188-apt-mock]
+  workflow_dispatch:
+
+jobs:
+  apt:
+    name: ${{ matrix.image }} ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x64, image: "ubuntu:22.04", toolset: toolset-2204.json }
+          - { runner: ubuntu-24.04, arch: x64, image: "ubuntu:24.04", toolset: toolset-2404.json }
+          - { runner: ubuntu-24.04, arch: x64, image: "ubuntu:26.04", toolset: toolset-2604.json }
+          - { runner: ubuntu-24.04-arm, arch: arm64, image: "ubuntu:22.04", toolset: toolset-2204-arm64.json }
+          - { runner: ubuntu-24.04-arm, arch: arm64, image: "ubuntu:24.04", toolset: toolset-2404-arm64.json }
+          - { runner: ubuntu-24.04-arm, arch: arm64, image: "ubuntu:26.04", toolset: toolset-2604-arm64.json }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Save main's wrapper for comparison
+        run: |
+          git fetch -q https://github.com/actions/runner-images.git main
+          git show FETCH_HEAD:images/ubuntu/scripts/build/configure-apt-mock.sh > "$RUNNER_TEMP/main-mock.sh"
+
+      - name: Run checks in ${{ matrix.image }}
+        run: |
+          cat > "$RUNNER_TEMP/check.sh" <<'SCRIPT'
+          set -u
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq && apt-get install -y -qq lsb-release wget jq python3-minimal ca-certificates >/dev/null
+          r() { "$@"; echo ">>> rc=$? :: $*"; }
+
+          echo "::group::main wrapper"
+          sh /work/main-mock.sh; hash -r
+          r apt-get install -y netcat
+          r sh -c 'apt-get install cowsay </dev/null'
+          echo "::endgroup::"
+
+          echo "::group::PR wrapper"
+          sh /src/images/ubuntu/scripts/build/configure-apt-mock.sh; hash -r
+          r apt-get install -y netcat
+          r sh -c 'apt-get install cowsay </dev/null'
+          r apt-get install -y netcat-openbsd
+          command -v nc netcat
+          echo "::endgroup::"
+
+          echo "::group::PR wrapper, dpkg frontend lock held 12s"
+          python3 -c "import fcntl,time;f=open('/var/lib/dpkg/lock-frontend','w');fcntl.lockf(f,fcntl.LOCK_EX);time.sleep(12)" &
+          sleep 1
+          r apt-get install -y tree
+          wait
+          echo "::endgroup::"
+
+          echo "::group::PR install-ms-repos.sh with stdin closed"
+          cd /tmp && r bash -e /src/images/ubuntu/scripts/build/install-ms-repos.sh </dev/null
+          echo "::endgroup::"
+
+          echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90assumeyes
+
+          echo "::group::toolset apt packages through PR wrapper"
+          fails=""
+          for p in $(jq -r '.apt.vital_packages[], .apt.common_packages[], .apt.cmd_packages[]' /src/images/ubuntu/toolsets/$TOOLSET); do
+            apt-get install --no-install-recommends $p >/tmp/p.log 2>&1 || { fails="$fails $p"; echo "--- $p"; grep -E '^(E|W):' /tmp/p.log | tail -3; }
+          done
+          echo "::endgroup::"
+          echo ">>> FAILED PACKAGES:${fails:- none}"
+
+          if [ "$(lsb_release -rs)" = "24.04" ]; then
+            echo "::group::configure-dpkg.sh libicu70 block"
+            cd /tmp && wget -q https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb
+            r apt-get install -y ./libicu70_70.1-2_amd64.deb
+            echo "::endgroup::"
+          fi
+
+          echo "::group::netcat package info"
+          apt-cache show netcat 2>&1 | grep -E '^(Package|Version|Depends|Description)' | head -8
+          apt-cache policy netcat-openbsd | head -3
+          echo "::endgroup::"
+          SCRIPT
+          docker run --rm -e TOOLSET=${{ matrix.toolset }} \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -v "$RUNNER_TEMP/main-mock.sh:/work/main-mock.sh:ro" \
+            -v "$RUNNER_TEMP/check.sh:/work/check.sh:ro" \
+            ${{ matrix.image }} bash /work/check.sh 2>&1 | tee "$RUNNER_TEMP/out.log"
+          echo '### ${{ matrix.image }} ${{ matrix.arch }}' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep '^>>>' "$RUNNER_TEMP/out.log" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
