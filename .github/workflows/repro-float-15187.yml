@@ -13,10 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
-        python: ['3.13.16', '3.13.17', '3.13.18']
-        include:
-          - { os: ubuntu-22.04, python: '3.13.16' }
+        os: [ubuntu-24.04, ubuntu-22.04]
+        python: ['3.13.16']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -39,7 +37,24 @@ jobs:
           python -m pip install -q -r requirements_py3-13.txt
           python -m pip install -q -e ".[testing]"
           python -m pip freeze | grep -iE '^(numpy|numba|llvmlite|scipy|mdanalysis)=='
-      - name: ProteinAmide tests
+      - name: numba sysinfo (CPU detection)
+        run: numba -s | sed -n '/Hardware Information/,/OS Information/p;/CPU Features/,+3p'
+      - name: ProteinAmide tests - default JIT
+        if: always()
         working-directory: source
-        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 25
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
+        shell: bash -o pipefail {0}
+      - name: ProteinAmide tests - NUMBA_CPU_NAME=generic
+        if: always()
+        working-directory: source
+        env:
+          NUMBA_CPU_NAME: generic
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
+        shell: bash -o pipefail {0}
+      - name: ProteinAmide tests - NUMBA_DISABLE_JIT=1
+        if: always()
+        working-directory: source
+        env:
+          NUMBA_DISABLE_JIT: '1'
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
         shell: bash -o pipefail {0}
