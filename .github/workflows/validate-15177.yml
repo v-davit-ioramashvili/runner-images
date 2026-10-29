@@ -1,42 +1,42 @@
 name: validate-15177
 on: workflow_dispatch
 jobs:
-  check:
+  workaround-rm:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm, ubuntu-24.04, ubuntu-22.04]
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: tmpfiles config for /tmp
+      - name: Remove the leftover directory
+        run: sudo rm -rf /tmp/node-compile-cache
+      - name: Default compile cache
+        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
+  workaround-env:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Point the cache at RUNNER_TEMP
+        run: echo "NODE_COMPILE_CACHE=$RUNNER_TEMP/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Default compile cache
+        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
+  fix-override:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install the tmp.conf override and run the boot-time rules for /tmp
         run: |
-          echo "ImageVersion=$ImageVersion"
-          dpkg-query -W systemd
-          echo "tmp.mount: $(systemctl is-enabled tmp.mount 2>&1)  fstype: $(findmnt -n -o FSTYPE /tmp)"
-          echo "--- /usr/lib/tmpfiles.d/tmp.conf"; grep -v '^#' /usr/lib/tmpfiles.d/tmp.conf | sed '/^$/d'
-          echo "--- /etc/tmpfiles.d"; ls -la /etc/tmpfiles.d/ 2>/dev/null; grep -rH '/tmp' /etc/tmpfiles.d/ 2>/dev/null || true
-          echo "--- effective"; systemd-tmpfiles --cat-config 2>/dev/null | grep -E '^[^#].*[[:space:]]/tmp([[:space:]]|$)' || true
-          systemctl cat systemd-tmpfiles-setup.service | grep ExecStart
-      - name: Older systemd package tmp.conf (26.04 only)
-        if: startsWith(matrix.os, 'ubuntu-26.04')
-        run: |
-          apt-cache madison systemd || true
-          cd "$RUNNER_TEMP"
-          for v in 259.5-0ubuntu3.4 $(dpkg-query -W -f='${Version}' systemd); do
-            mkdir -p "x-$v"
-            if apt-get download "systemd=$v" >/dev/null 2>&1; then
-              dpkg-deb -x systemd_*"${v#*:}"*.deb "x-$v" 2>/dev/null || dpkg-deb -x $(ls -t systemd_*.deb | head -1) "x-$v"
-              echo "=== $v tmp.conf"; grep -v '^#' "x-$v/usr/lib/tmpfiles.d/tmp.conf" | sed '/^$/d'
-            else
-              echo "=== $v not downloadable from the archive"
-            fi
-          done
-          apt-get changelog systemd 2>/dev/null | grep -n -i -B2 -A2 'tmp\.conf\|/tmp ' | head -40 || true
-      - name: Simulate boot-time /tmp cleanup with a D rule (26.04 only)
-        if: startsWith(matrix.os, 'ubuntu-26.04')
-        run: |
-          echo "before: $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) entries older than this job"
-          d=$(sudo mktemp -d /var/tmp/sim.XXXX); sudo cp -a /tmp/node-compile-cache /tmp/v8-compile-cache-1000 /tmp/vcpkg "$d"/
-          echo "D $d 1777 root root -" | sudo tee /etc/tmpfiles.d/sim-15177.conf
-          sudo systemd-tmpfiles --create --remove --boot /etc/tmpfiles.d/sim-15177.conf
-          echo "after D --remove --boot:"; sudo ls -la "$d"
+          echo "D /tmp 1777 root root -" | sudo tee /etc/tmpfiles.d/tmp.conf
+          echo "effective: $(systemd-tmpfiles --cat-config | grep -E '^[^#].*[[:space:]]/tmp[[:space:]]')"
+          echo "before: $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) build leftovers"
+          sudo systemd-tmpfiles --create --remove --boot --prefix=/tmp
+          echo "after:  $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) build leftovers"
+          stat -c '%A %U:%G %n' /tmp
+      - name: Default compile cache
+        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
