@@ -13,8 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-22.04]
-        python: ['3.13.16']
+        os: [ubuntu-24.04]
+        python: ['3.13.17']
+        sample: [1, 2, 3, 4, 5, 6]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -37,24 +38,26 @@ jobs:
           python -m pip install -q -r requirements_py3-13.txt
           python -m pip install -q -e ".[testing]"
           python -m pip freeze | grep -iE '^(numpy|numba|llvmlite|scipy|mdanalysis)=='
-      - name: numba sysinfo (CPU detection)
-        run: numba -s | sed -n '/Hardware Information/,/OS Information/p;/CPU Features/,+3p'
-      - name: ProteinAmide tests - default JIT
+      - name: BLAS / SIMD detection
+        working-directory: source
+        run: |
+          python -c "import numpy; numpy.show_runtime()" 2>&1 | grep -E "architecture|internal_api|num_threads|version|found|not_found" | head -20
+      - name: ProteinAmide tests - default
         if: always()
         working-directory: source
-        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 3
         shell: bash -o pipefail {0}
-      - name: ProteinAmide tests - NUMBA_CPU_NAME=generic
+      - name: ProteinAmide tests - OPENBLAS_CORETYPE=Haswell
         if: always()
         working-directory: source
         env:
-          NUMBA_CPU_NAME: generic
-        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
+          OPENBLAS_CORETYPE: Haswell
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 3
         shell: bash -o pipefail {0}
-      - name: ProteinAmide tests - NUMBA_DISABLE_JIT=1
+      - name: ProteinAmide tests - OPENBLAS_NUM_THREADS=1
         if: always()
         working-directory: source
         env:
-          NUMBA_DISABLE_JIT: '1'
-        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 8
+          OPENBLAS_NUM_THREADS: '1'
+        run: pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 3
         shell: bash -o pipefail {0}
