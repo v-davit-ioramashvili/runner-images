@@ -5,33 +5,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, ubuntu-24.04, ubuntu-22.04, ubuntu-26.04-arm, ubuntu-24.04-arm, ubuntu-22.04-arm]
+        os: [ubuntu-26.04, ubuntu-26.04-arm, ubuntu-24.04, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Image info
+      - name: tmpfiles config for /tmp
         run: |
-          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
-          id
-          findmnt -n -o FSTYPE,SOURCE /tmp || true
-          stat -c '%A %U:%G %y %n' /tmp
-          env | grep -i '^NODE\|TMPDIR' || true
-      - name: /tmp leftovers at job start
+          echo "ImageVersion=$ImageVersion"
+          dpkg-query -W systemd
+          echo "tmp.mount: $(systemctl is-enabled tmp.mount 2>&1)  fstype: $(findmnt -n -o FSTYPE /tmp)"
+          echo "--- /usr/lib/tmpfiles.d/tmp.conf"; grep -v '^#' /usr/lib/tmpfiles.d/tmp.conf | sed '/^$/d'
+          echo "--- /etc/tmpfiles.d"; ls -la /etc/tmpfiles.d/ 2>/dev/null; grep -rH '/tmp' /etc/tmpfiles.d/ 2>/dev/null || true
+          echo "--- effective"; systemd-tmpfiles --cat-config 2>/dev/null | grep -E '^[^#].*[[:space:]]/tmp([[:space:]]|$)' || true
+          systemctl cat systemd-tmpfiles-setup.service | grep ExecStart
+      - name: Older systemd package tmp.conf (26.04 only)
+        if: startsWith(matrix.os, 'ubuntu-26.04')
         run: |
-          sudo find /tmp -maxdepth 3 -printf '%M %u:%g %TY-%Tm-%Td %TH:%TM %p\n' | sort -k5
-      - name: Default compile cache as runner
-        run: |
-          which node; node -v; npm -v
-          NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); console.log(JSON.stringify(m.enableCompileCache())); console.log('dir=' + m.getCompileCacheDir())"
-      - name: Which tool creates node-compile-cache
-        run: |
-          for c in "node -v" "npm --version" "npx --version" "corepack --version" "yarn --version" "n --version" "tsc --version" "lerna --version" "parcel --version" "webpack --version" "gulp --version" "grunt --version" "newman --version" "netlify --version" "vercel --version"; do
-            bin=${c%% *}
-            command -v "$bin" >/dev/null || { echo "SKIP  $c (not installed)"; continue; }
-            d=$(mktemp -d -p "$RUNNER_TEMP")
-            TMPDIR="$d" timeout 120 $c >/dev/null 2>&1 || true
-            if [ -d "$d/node-compile-cache" ]; then echo "CREATES  $c -> $(ls "$d/node-compile-cache")"; else echo "no       $c"; fi
+          apt-cache madison systemd || true
+          cd "$RUNNER_TEMP"
+          for v in 259.5-0ubuntu3.4 $(dpkg-query -W -f='${Version}' systemd); do
+            mkdir -p "x-$v"
+            if apt-get download "systemd=$v" >/dev/null 2>&1; then
+              dpkg-deb -x systemd_*"${v#*:}"*.deb "x-$v" 2>/dev/null || dpkg-deb -x $(ls -t systemd_*.deb | head -1) "x-$v"
+              echo "=== $v tmp.conf"; grep -v '^#' "x-$v/usr/lib/tmpfiles.d/tmp.conf" | sed '/^$/d'
+            else
+              echo "=== $v not downloadable from the archive"
+            fi
           done
-      - name: Who calls enableCompileCache
+          apt-get changelog systemd 2>/dev/null | grep -n -i -B2 -A2 'tmp\.conf\|/tmp ' | head -40 || true
+      - name: Simulate boot-time /tmp cleanup with a D rule (26.04 only)
+        if: startsWith(matrix.os, 'ubuntu-26.04')
         run: |
-          grep -rl --include='*.js' --include='*.cjs' --include='*.mjs' 'enableCompileCache' "$(npm root -g)" 2>/dev/null | grep -v '/node_modules/.*/node_modules/' | head -20 || true
-          for b in npm npx yarn n tsc; do p=$(command -v $b) || continue; r=$(readlink -f "$p"); echo "== $b -> $r"; grep -n 'enableCompileCache' "$r" 2>/dev/null | head -3; done
+          echo "before: $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) entries older than this job"
+          d=$(sudo mktemp -d /var/tmp/sim.XXXX); sudo cp -a /tmp/node-compile-cache /tmp/v8-compile-cache-1000 /tmp/vcpkg "$d"/
+          echo "D $d 1777 root root -" | sudo tee /etc/tmpfiles.d/sim-15177.conf
+          sudo systemd-tmpfiles --create --remove --boot /etc/tmpfiles.d/sim-15177.conf
+          echo "after D --remove --boot:"; sudo ls -la "$d"
