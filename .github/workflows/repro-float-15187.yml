@@ -55,7 +55,7 @@ jobs:
         working-directory: source
         run: |
           git checkout -q -- GMAP/src/tools/map_reader.py
-          sed -i -E 's/\[\*(direc|subdir)\.iterdir\(\)\]/sorted(.iterdir())/g' GMAP/src/tools/map_reader.py
+          sed -i -E 's/\[\*(direc|subdir)\.iterdir\(\)\]/sorted(.iterdir())/g' GMAP/src/tools/map_reader.py
           git diff --stat
           pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 3
         shell: bash -o pipefail {0}
@@ -64,7 +64,7 @@ jobs:
         working-directory: source
         run: |
           git checkout -q -- GMAP/src/tools/map_reader.py
-          sed -i -E 's/\[\*(direc|subdir)\.iterdir\(\)\]/sorted(.iterdir(), reverse=True)/g' GMAP/src/tools/map_reader.py
+          sed -i -E 's/\[\*(direc|subdir)\.iterdir\(\)\]/sorted(.iterdir(), reverse=True)/g' GMAP/src/tools/map_reader.py
           git diff --stat
           pytest -p GMAP.tests.conftest GMAP/maps/Pairs/ProteinAmide/tests -q 2>&1 | tail -n 3
         shell: bash -o pipefail {0}
