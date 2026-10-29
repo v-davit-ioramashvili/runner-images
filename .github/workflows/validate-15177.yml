@@ -1,0 +1,37 @@
+name: validate-15177
+on: workflow_dispatch
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-24.04, ubuntu-22.04, ubuntu-26.04-arm, ubuntu-24.04-arm, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Image info
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          id
+          findmnt -n -o FSTYPE,SOURCE /tmp || true
+          stat -c '%A %U:%G %y %n' /tmp
+          env | grep -i '^NODE\|TMPDIR' || true
+      - name: /tmp leftovers at job start
+        run: |
+          sudo find /tmp -maxdepth 3 -printf '%M %u:%g %TY-%Tm-%Td %TH:%TM %p\n' | sort -k5
+      - name: Default compile cache as runner
+        run: |
+          which node; node -v; npm -v
+          NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); console.log(JSON.stringify(m.enableCompileCache())); console.log('dir=' + m.getCompileCacheDir())"
+      - name: Which tool creates node-compile-cache
+        run: |
+          for c in "node -v" "npm --version" "npx --version" "corepack --version" "yarn --version" "n --version" "tsc --version" "lerna --version" "parcel --version" "webpack --version" "gulp --version" "grunt --version" "newman --version" "netlify --version" "vercel --version"; do
+            bin=${c%% *}
+            command -v "$bin" >/dev/null || { echo "SKIP  $c (not installed)"; continue; }
+            d=$(mktemp -d -p "$RUNNER_TEMP")
+            TMPDIR="$d" timeout 120 $c >/dev/null 2>&1 || true
+            if [ -d "$d/node-compile-cache" ]; then echo "CREATES  $c -> $(ls "$d/node-compile-cache")"; else echo "no       $c"; fi
+          done
+      - name: Who calls enableCompileCache
+        run: |
+          grep -rl --include='*.js' --include='*.cjs' --include='*.mjs' 'enableCompileCache' "$(npm root -g)" 2>/dev/null | grep -v '/node_modules/.*/node_modules/' | head -20 || true
+          for b in npm npx yarn n tsc; do p=$(command -v $b) || continue; r=$(readlink -f "$p"); echo "== $b -> $r"; grep -n 'enableCompileCache' "$r" 2>/dev/null | head -3; done
