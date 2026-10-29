@@ -1,42 +1,12 @@
 name: validate-15177
 on: workflow_dispatch
 jobs:
-  workaround-rm:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Remove the leftover directory
-        run: sudo rm -rf /tmp/node-compile-cache
-      - name: Default compile cache
-        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
-  workaround-env:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Point the cache at RUNNER_TEMP
-        run: echo "NODE_COMPILE_CACHE=$RUNNER_TEMP/node-compile-cache" >> "$GITHUB_ENV"
-      - name: Default compile cache
-        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
   fix-override:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-26.04
     steps:
       - name: Install the tmp.conf override and run the boot-time rules for /tmp
         run: |
           echo "D /tmp 1777 root root -" | sudo tee /etc/tmpfiles.d/tmp.conf
-          echo "effective: $(systemd-tmpfiles --cat-config | grep -E '^[^#].*[[:space:]]/tmp[[:space:]]')"
-          echo "before: $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) build leftovers"
           sudo systemd-tmpfiles --create --remove --boot --prefix=/tmp
-          echo "after:  $(sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' | wc -l) build leftovers"
-          stat -c '%A %U:%G %n' /tmp
-      - name: Default compile cache
-        run: NODE_DEBUG_NATIVE=COMPILE_CACHE node -e "const m=require('node:module'); m.enableCompileCache(); console.log('dir=' + m.getCompileCacheDir())"
+          echo "remaining old entries:"; sudo find /tmp -mindepth 1 -maxdepth 1 ! -newermt '2026-10-28' -printf '%M %u:%g %TY-%Tm-%Td %TH:%TM %p\n'
+          echo "x11.conf etc:"; systemd-tmpfiles --cat-config | grep -E '^[^#].*[[:space:]]/tmp/' || true
