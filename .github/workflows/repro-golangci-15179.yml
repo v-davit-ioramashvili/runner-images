@@ -1,0 +1,86 @@
+name: Repro golangci-lint shutdown - issue 15179
+
+# Run manually from the Actions tab. Checks
+# https://github.com/actions/runner-images/issues/15179 :
+# golangci-lint v1.64.8 on ubuntu-26.04 ends with "The runner has received a
+# shutdown signal", while the same job passes on ubuntu-24.04.
+#
+# Hypothesis: v1.64.8 is built with Go 1.24, but the default Go on 26.04 is
+# 1.26 (24.04 defaults to 1.24). Analysing newer stdlib sources with an older
+# linter may blow up memory until the VM dies.
+#
+#   1) CONFIG  - swap, memory, oomd/earlyoom, overcommit on each image.
+#   2) LINT    - golangci-lint v1.64.8, concurrency 2, with a memory/disk
+#                monitor printing into the same step log (survives a VM kill).
+#   3) CONTROL - 26.04 with Go 1.24 from setup-go, to isolate the Go version.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, go: default, repo: prometheus/prometheus, ref: v3.2.1 }
+          - { os: ubuntu-26.04, go: default, repo: prometheus/prometheus, ref: v3.2.1 }
+          - { os: ubuntu-26.04, go: '1.24', repo: prometheus/prometheus, ref: v3.2.1 }
+          - { os: ubuntu-24.04, go: default, repo: hashicorp/terraform, ref: v1.11.4 }
+          - { os: ubuntu-26.04, go: default, repo: hashicorp/terraform, ref: v1.11.4 }
+          - { os: ubuntu-26.04, go: '1.24', repo: hashicorp/terraform, ref: v1.11.4 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Image config (swap, memory, OOM handling)
+        run: |
+          echo "ImageVersion=$ImageVersion"; nproc; free -m; swapon --show
+          df -h / /mnt
+          grep -E '^ResourceDisk\.(Format|EnableSwap|SwapSizeMB)' /etc/waagent.conf || echo "no waagent.conf ResourceDisk keys"
+          sysctl vm.overcommit_memory vm.overcommit_ratio vm.swappiness vm.panic_on_oom 2>/dev/null
+          for u in systemd-oomd earlyoom; do echo "== $u: $(systemctl is-enabled $u 2>&1) / $(systemctl is-active $u 2>&1)"; done
+          cat /etc/systemd/oomd.conf 2>/dev/null | grep -v '^#' | grep . || true
+          oomctl 2>/dev/null | head -30 || true
+          echo "== runner cgroup"; cat /proc/self/cgroup
+          cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+          for f in memory.max memory.high memory.swap.max memory.oom.group; do echo "$f=$(cat $cg/$f 2>/dev/null)"; done
+          cat /proc/pressure/memory 2>/dev/null
+
+      - uses: actions/setup-go@v5
+        if: matrix.go != 'default'
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+
+      - name: Checkout target repo
+        run: |
+          git clone --depth 1 --branch ${{ matrix.ref }} https://github.com/${{ matrix.repo }} target
+          which go; go version; grep -E '^(go|toolchain) ' target/go.mod
+
+      - name: Install golangci-lint v1.64.8
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$HOME/bin" v1.64.8
+          "$HOME/bin/golangci-lint" version
+
+      - name: Run golangci-lint with monitor
+        working-directory: target
+        env:
+          GOMAXPROCS: '2'
+          GOFLAGS: '-p=2'
+          GOTOOLCHAIN: local
+        run: |
+          (while true; do
+             echo "MON $(date +%T) $(free -m | awk '/Mem:/{printf "mem used=%s avail=%s",$3,$7} /Swap:/{printf " swap used=%s/%s",$3,$2}') disk=$(df --output=avail -m / | tail -1)M psi=$(awk '/some/{print $2}' /proc/pressure/memory)"
+             ps -eo rss,comm --sort=-rss | awk 'NR>1 && NR<=4{printf "  %s %dM\n",$2,$1/1024}'
+             sleep 10
+           done) &
+          MON=$!
+          start=$(date +%s)
+          set +e
+          /usr/bin/time -v "$HOME/bin/golangci-lint" run --concurrency 2 --timeout 40m ./... > lint.out 2> time.out
+          rc=$?
+          kill $MON
+          echo "golangci-lint exit=$rc after $(( $(date +%s) - start ))s"
+          tail -20 lint.out
+          grep -E 'Maximum resident|Elapsed|Exit status' time.out
+          sudo dmesg | grep -iE 'oom|killed process' | tail -5 || true
