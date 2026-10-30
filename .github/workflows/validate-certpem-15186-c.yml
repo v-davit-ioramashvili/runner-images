@@ -1,0 +1,33 @@
+name: validate-brew-cacert-15191
+on:
+  push:
+    branches: [validate/15186-certpem]
+  workflow_dispatch:
+
+jobs:
+  brew:
+    name: brew (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-26, xcode-27, macos-15-intel, macos-26-intel]
+    steps:
+      - name: Homebrew ca-certificates on the image
+        run: |
+          set +e
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion $(sw_vers -productVersion)"
+          B=$(brew --prefix)
+          brew --version | head -1
+          brew list --versions ca-certificates curl openssl@3
+          brew info --json=v2 ca-certificates | jq -r '.formulae[0] | "installed=\(.installed[0].version) pinned=\(.pinned) on_request=\(.installed[0].installed_on_request)"'
+          for f in "$B/opt/ca-certificates/share/ca-certificates/cacert.pem" "$B/etc/ca-certificates/cert.pem"; do
+            echo "$f: $(grep -c 'BEGIN CERT' "$f") certs, eMudhra/AAA hits by name: $(grep -cE 'emSign ECC Root CA - G3|AAA Certificate Services' "$f")"
+            n=0; while read -r c; do n=$((n+1)); done < <(openssl crl2pkcs7 -nocrl -certfile "$f" | openssl pkcs7 -print_certs -noout | grep -E 'subject=.*(emSign ECC Root CA - G3|AAA Certificate Services)')
+            echo "  parsed subjects matching: $n"
+          done
+          for h in dv-g3b-emudhra dv-g3b-aaa-emudhra; do
+            "$B/opt/curl/bin/curl" -sS -o /dev/null --max-time 30 "https://$h.we-have-a-problem.com/" && echo "brew curl $h ACCEPT" || echo "brew curl $h REJECT"
+            curl -sS -o /dev/null --max-time 30 --cacert "$B/opt/ca-certificates/share/ca-certificates/cacert.pem" "https://$h.we-have-a-problem.com/" && echo "PATH curl + share cacert.pem $h ACCEPT" || echo "PATH curl + share cacert.pem $h REJECT"
+          done
