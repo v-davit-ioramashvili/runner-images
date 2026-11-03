@@ -25,9 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-22.04]
-        # 7.0 = reporter's case (fits in RAM), 9.25 = half the swap used,
-        # 11.75 = more than RAM + swap, the OOM killer has to act.
-        target: ['7.0', '9.25', '11.75']
+        # Run 1: 7.0 and 9.25 GiB passed on both kernels. Now only the edge
+        # (10.25, swap nearly full) and past RAM + swap (11.75), twice each.
+        target: ['10.25', '11.75']
+        attempt: [1, 2]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -79,7 +80,11 @@ jobs:
           }
           console.log('LEAK done');
           EOF
+          echo "== OOM score of runner-side processes"
+          ps -eo pid,oom_score_adj,rss,comm | awk 'NR==1 || /Runner|provjob|hosted|agent|node/'
+          sudo dmesg -w | grep --line-buffered -iE 'oom|killed process|out of memory|hung_task|blocked for' | sed -u 's/^/KERN /' &
           monitor() {
+            set +e
             seen=0
             while true; do
               m=$(awk '/MemAvailable/{a=$2}/SwapFree/{s=$2}END{printf "avail=%dM swapfree=%dM", a/1024, s/1024}' /proc/meminfo)
@@ -87,10 +92,6 @@ jobs:
               r=$(ps -C node -o rss= 2>/dev/null | awk '{t+=$1}END{printf "%dM", t/1024}')
               w=$(ps -C Runner.Worker -o rss= 2>/dev/null | awk '{printf "%dM", $1/1024}')
               echo "MON $(date +%T) $m psi[$p] node=$r worker=$w"
-              k=$(sudo dmesg | grep -iE 'oom|killed process|hung_task|blocked for')
-              n=$(printf '%s' "$k" | grep -c .)
-              [ "$n" -gt "$seen" ] && printf '%s\n' "$k" | tail -n +$((seen + 1)) | sed 's/^/KERN /'
-              seen=$n
               sleep 2
             done
           }
