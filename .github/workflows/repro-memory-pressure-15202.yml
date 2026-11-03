@@ -1,0 +1,109 @@
+name: Repro memory pressure shutdown - issue 15202
+
+# Run manually from the Actions tab. Checks
+# https://github.com/actions/runner-images/issues/15202 :
+# a ~7 GB Node process on ubuntu-24.04 (8 GB RAM + 3 GiB swap, private repo)
+# passed on kernel 6.17 images and now ends with "The runner has received a
+# shutdown signal" on kernel 7.0 images.
+#
+# Public-repo runners have 16 GB, so we reserve hugepages to leave ~7.75 GiB
+# usable and switch swap to a 3 GiB /swapfile, like the reporter's VM.
+# Kernel 7.0 (ubuntu-24.04) is compared with kernel 6.8 (ubuntu-22.04).
+#
+#   1) CONFIG  - kernel memory settings that could differ between kernels.
+#   2) SHRINK  - hugepage reservation + 3 GiB swap.
+#   3) LEAK    - Node holds TARGET GiB and keeps touching it, with a monitor
+#                printing into the same step log (survives a VM kill).
+#   4) AFTER   - OOM killer / hung task lines from the kernel log.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pressure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+        # 7.0 = reporter's case (fits in RAM), 9.25 = half the swap used,
+        # 11.75 = more than RAM + swap, the OOM killer has to act.
+        target: ['7.0', '9.25', '11.75']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Kernel memory config
+        run: |
+          echo "ImageVersion=$ImageVersion"; uname -r; nproc; free -m; swapon --show
+          sysctl vm.overcommit_memory vm.overcommit_ratio vm.swappiness vm.min_free_kbytes \
+            vm.watermark_scale_factor vm.watermark_boost_factor vm.page-cluster vm.panic_on_oom \
+            vm.oom_kill_allocating_task vm.vfs_cache_pressure 2>/dev/null
+          echo "== zswap"; grep -H . /sys/module/zswap/parameters/* 2>/dev/null || echo "no zswap"
+          echo "== MGLRU"; cat /sys/kernel/mm/lru_gen/enabled /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || echo "no lru_gen"
+          echo "== THP"; cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag
+          for u in systemd-oomd earlyoom; do echo "== $u: $(systemctl is-enabled $u 2>&1) / $(systemctl is-active $u 2>&1)"; done
+          echo "== runner cgroup"; cat /proc/self/cgroup
+          cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+          for f in memory.max memory.high memory.swap.max memory.oom.group; do echo "$f=$(cat $cg/$f 2>/dev/null)"; done
+          cat /proc/pressure/memory
+
+      - name: Shrink VM to ~7.75 GiB RAM + 3 GiB swap
+        run: |
+          sudo sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+          echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          total_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+          keep_kb=$((7750 * 1024))
+          pages=$(( (total_kb - keep_kb) / 2048 ))
+          echo $pages | sudo tee /proc/sys/vm/nr_hugepages >/dev/null
+          echo "requested $pages hugepages, got $(cat /proc/sys/vm/nr_hugepages)"
+          sudo swapoff -a
+          sudo fallocate -l 3G /swapfile3g && sudo chmod 600 /swapfile3g
+          sudo mkswap /swapfile3g >/dev/null && sudo swapon /swapfile3g
+          free -m; swapon --show
+          awk '/MemTotal|MemAvailable|HugePages_Total|Hugetlb/' /proc/meminfo
+
+      - name: Leak ${{ matrix.target }} GiB with monitor
+        env:
+          TARGET_GIB: ${{ matrix.target }}
+        run: |
+          cat > leak.js <<'EOF'
+          const target = Math.floor(parseFloat(process.env.TARGET_GIB) * 1024 ** 3);
+          const chunk = 64 * 1024 ** 2, bufs = [];
+          let held = 0;
+          while (held < target) { bufs.push(Buffer.alloc(chunk, bufs.length & 0xff)); held += chunk; }
+          console.log(`LEAK reached ${(held / 1024 ** 3).toFixed(2)} GiB, touching for 180 s`);
+          const end = Date.now() + 180000;
+          let pass = 0;
+          while (Date.now() < end) {
+            for (const b of bufs) for (let i = 0; i < b.length; i += 4096) b[i]++;
+            console.log(`LEAK touch pass ${++pass}`);
+          }
+          console.log('LEAK done');
+          EOF
+          monitor() {
+            seen=0
+            while true; do
+              m=$(awk '/MemAvailable/{a=$2}/SwapFree/{s=$2}END{printf "avail=%dM swapfree=%dM", a/1024, s/1024}' /proc/meminfo)
+              p=$(awk '/some/{s=$2}/full/{f=$2}END{print s, f}' /proc/pressure/memory)
+              r=$(ps -C node -o rss= 2>/dev/null | awk '{t+=$1}END{printf "%dM", t/1024}')
+              w=$(ps -C Runner.Worker -o rss= 2>/dev/null | awk '{printf "%dM", $1/1024}')
+              echo "MON $(date +%T) $m psi[$p] node=$r worker=$w"
+              k=$(sudo dmesg | grep -iE 'oom|killed process|hung_task|blocked for')
+              n=$(printf '%s' "$k" | grep -c .)
+              [ "$n" -gt "$seen" ] && printf '%s\n' "$k" | tail -n +$((seen + 1)) | sed 's/^/KERN /'
+              seen=$n
+              sleep 2
+            done
+          }
+          monitor & mon=$!
+          set +e
+          node leak.js; rc=$?
+          kill $mon
+          echo "node exit code: $rc"
+
+      - name: Kernel log after the leak
+        if: always()
+        run: |
+          sudo dmesg | grep -iE 'oom|killed process|hung_task|blocked for' || echo "no OOM or hung task lines"
+          cat /proc/pressure/memory
+          cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+          cat $cg/memory.events 2>/dev/null
