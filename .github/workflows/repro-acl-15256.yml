@@ -23,6 +23,26 @@ jobs:
         shell: pwsh
         run: |
           @'
+          Add-Type -TypeDefinition @"
+          using System; using System.Runtime.InteropServices;
+          public static class RawSec {
+            [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+            public static extern bool GetFileSecurity(string f, int info, byte[] sd, int len, out int needed);
+            [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+            public static extern bool SetFileSecurity(string f, int info, byte[] sd);
+          }
+          "@
+          function Get-RawSddl([string]$p) {
+            $n = 0; [RawSec]::GetFileSecurity($p, 4, $null, 0, [ref]$n) | Out-Null
+            $b = New-Object byte[] $n
+            if (-not [RawSec]::GetFileSecurity($p, 4, $b, $n, [ref]$n)) { return "GetFileSecurity failed $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+            (New-Object System.Security.AccessControl.RawSecurityDescriptor($b, 0)).GetSddlForm('Access')
+          }
+          function Set-RawSddl([string]$p, [string]$sddl) {
+            $r = New-Object System.Security.AccessControl.RawSecurityDescriptor($sddl)
+            $b = New-Object byte[] $r.BinaryLength; $r.GetBinaryForm($b, 0)
+            if (-not [RawSec]::SetFileSecurity($p, 4, $b)) { throw "SetFileSecurity failed $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+          }
           function Show-Acl([string]$p) {
             $a = Get-Acl -LiteralPath $p
             $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($a.Sddl)
@@ -30,6 +50,7 @@ jobs:
             Write-Host "Owner: $($a.Owner)  Protected: $($a.AreAccessRulesProtected)  AutoInherited: $([bool]($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited))"
             Write-Host "Sddl: $($a.Sddl)"
             Write-Host "Flags: $($raw.ControlFlags)"
+            Write-Host "RawSddl: $(Get-RawSddl $p)"
             icacls $p | Out-Host
           }
           function Test-CheckoutKey([string]$dir, [string]$label) {
@@ -44,6 +65,7 @@ jobs:
             Write-Host "RESULT [$label] ssh-keygen -y: $(if ($unprot) { 'UNPROTECTED' } else { 'OK' })"
             if ($unprot) { Write-Host $o }
             Remove-Item $f -Force
+            $global:LASTEXITCODE = 0
           }
           '@ | Set-Content "$env:RUNNER_TEMP\..\acl-helpers.ps1"
           "HELPERS=$((Resolve-Path "$env:RUNNER_TEMP\..").Path)\acl-helpers.ps1" >> $env:GITHUB_ENV
@@ -82,6 +104,21 @@ jobs:
           $nf = Join-Path $env:RUNNER_TEMP 'newfile.txt'; 'x' | Set-Content $nf; Show-Acl $nf
           New-Item -ItemType Directory C:\probe-before -Force | Out-Null; Show-Acl C:\probe-before
           Test-CheckoutKey $env:RUNNER_TEMP 'before'
+          exit 0
+
+      - name: Controlled AI vs no-AI folders
+        shell: pwsh
+        run: |
+          . $env:HELPERS
+          $acl = '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)'
+          foreach ($v in @(@{n='C:\ctl-noai'; s="D:P$acl"}, @{n='C:\ctl-ai'; s="D:PAI$acl"})) {
+            New-Item -ItemType Directory $v.n -Force | Out-Null
+            Set-RawSddl $v.n $v.s
+            Show-Acl $v.n
+            $nf = Join-Path $v.n 'f.txt'; 'x' | Set-Content $nf; Show-Acl $nf
+            Test-CheckoutKey $v.n $v.n
+          }
+          exit 0
 
       - name: Apply variant ${{ matrix.variant }}
         if: matrix.variant != 'none'
@@ -108,6 +145,7 @@ jobs:
           $nf = Join-Path C:\probe-after 'f.txt'; 'x' | Set-Content $nf; Show-Acl $nf
           Test-CheckoutKey $env:RUNNER_TEMP 'after'
           Test-CheckoutKey C:\probe-after 'after-newdir'
+          exit 0
 
       - name: Real actions/checkout with ssh-key
         id: co
