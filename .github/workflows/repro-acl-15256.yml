@@ -1,0 +1,133 @@
+name: repro-acl-15256
+on:
+  push:
+    branches: [repro-15256]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: ${{ matrix.runner }} / ${{ matrix.variant }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-arm, windows-11-vs2026-arm, windows-2025, windows-2022]
+        variant: [none, reset-temp, root-inherit, a-reset]
+        exclude:
+          - { runner: windows-2025, variant: reset-temp }
+          - { runner: windows-2025, variant: a-reset }
+          - { runner: windows-2022, variant: reset-temp }
+          - { runner: windows-2022, variant: a-reset }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Define helpers
+        shell: pwsh
+        run: |
+          @'
+          function Show-Acl([string]$p) {
+            $a = Get-Acl -LiteralPath $p
+            $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($a.Sddl)
+            Write-Host "=== $p"
+            Write-Host "Owner: $($a.Owner)  Protected: $($a.AreAccessRulesProtected)  AutoInherited: $([bool]($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited))"
+            Write-Host "Sddl: $($a.Sddl)"
+            Write-Host "Flags: $($raw.ControlFlags)"
+            icacls $p | Out-Host
+          }
+          function Test-CheckoutKey([string]$dir, [string]$label) {
+            $f = Join-Path $dir ([guid]::NewGuid().ToString())
+            node -e "require('fs').writeFileSync(process.argv[1], require('fs').readFileSync(process.argv[2]), { mode: 0o600 })" $f "$env:USERPROFILE\gen\k"
+            Write-Host "--- [$label] key as written"; icacls $f | Out-Host
+            icacls $f /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):F" | Out-Null
+            icacls $f /inheritance:r | Out-Null
+            Write-Host "--- [$label] after checkout's grant:r + inheritance:r"; icacls $f | Out-Host
+            $o = & ssh-keygen.exe -y -f $f 2>&1 | Out-String
+            $unprot = $o -match 'UNPROTECTED|Bad permissions'
+            Write-Host "RESULT [$label] ssh-keygen -y: $(if ($unprot) { 'UNPROTECTED' } else { 'OK' })"
+            if ($unprot) { Write-Host $o }
+            Remove-Item $f -Force
+          }
+          '@ | Set-Content "$env:RUNNER_TEMP\..\acl-helpers.ps1"
+          "HELPERS=$((Resolve-Path "$env:RUNNER_TEMP\..").Path)\acl-helpers.ps1" >> $env:GITHUB_ENV
+
+      - name: Environment
+        shell: pwsh
+        run: |
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          "User=$env:USERDOMAIN\$env:USERNAME"
+          "RUNNER_WORKSPACE=$env:RUNNER_WORKSPACE RUNNER_TEMP=$env:RUNNER_TEMP"
+          Get-Command ssh, ssh-keygen -All | Format-Table Source -AutoSize
+          $os = Get-CimInstance Win32_OperatingSystem
+          "OS=$($os.Caption) $($os.Version) Install=$($os.InstallDate) Boot=$($os.LastBootUpTime)"
+          $root = Split-Path $env:RUNNER_WORKSPACE
+          "WorkRoot=$root Created=$((Get-Item $root).CreationTime)"
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Root -AutoSize
+
+      - name: Generate throwaway key
+        id: gen
+        shell: bash
+        run: |
+          mkdir -p "$USERPROFILE/gen"
+          ssh-keygen -q -t ed25519 -N "" -C probe -f "$USERPROFILE/gen/k"
+          while IFS= read -r line; do echo "::add-mask::$line"; done < "$USERPROFILE/gen/k"
+          { echo 'key<<EOF_KEY'; cat "$USERPROFILE/gen/k"; echo 'EOF_KEY'; } >> "$GITHUB_OUTPUT"
+
+      - name: ACLs before
+        shell: pwsh
+        run: |
+          . $env:HELPERS
+          $root = Split-Path $env:RUNNER_WORKSPACE
+          Show-Acl 'C:\'
+          if ($root -notlike 'C:*') { Show-Acl ((Split-Path $root -Qualifier) + '\') }
+          Show-Acl $root
+          Show-Acl $env:RUNNER_TEMP
+          $nf = Join-Path $env:RUNNER_TEMP 'newfile.txt'; 'x' | Set-Content $nf; Show-Acl $nf
+          New-Item -ItemType Directory C:\probe-before -Force | Out-Null; Show-Acl C:\probe-before
+          Test-CheckoutKey $env:RUNNER_TEMP 'before'
+
+      - name: Apply variant ${{ matrix.variant }}
+        if: matrix.variant != 'none'
+        shell: pwsh
+        run: |
+          $root = Split-Path $env:RUNNER_WORKSPACE
+          switch ('${{ matrix.variant }}') {
+            'reset-temp'   { icacls $env:RUNNER_TEMP /reset /t /c /q }
+            'root-inherit' { icacls C:\ /inheritance:e /c /q }
+            'a-reset'      { icacls $root /reset /t /c /q }
+          }
+          "exit=$LASTEXITCODE"
+
+      - name: ACLs after
+        if: matrix.variant != 'none'
+        shell: pwsh
+        run: |
+          . $env:HELPERS
+          $root = Split-Path $env:RUNNER_WORKSPACE
+          Show-Acl 'C:\'
+          Show-Acl $root
+          Show-Acl $env:RUNNER_TEMP
+          New-Item -ItemType Directory C:\probe-after -Force | Out-Null; Show-Acl C:\probe-after
+          $nf = Join-Path C:\probe-after 'f.txt'; 'x' | Set-Content $nf; Show-Acl $nf
+          Test-CheckoutKey $env:RUNNER_TEMP 'after'
+          Test-CheckoutKey C:\probe-after 'after-newdir'
+
+      - name: Real actions/checkout with ssh-key
+        id: co
+        continue-on-error: true
+        uses: actions/checkout@v5
+        with:
+          repository: actions/checkout
+          ssh-key: ${{ steps.gen.outputs.key }}
+          path: co-ssh
+
+      - name: Runner still works (https checkout, write, cleanup)
+        shell: pwsh
+        run: |
+          "ssh checkout outcome: ${{ steps.co.outcome }}"
+          New-Item -ItemType Directory "$env:GITHUB_WORKSPACE\w\x\y" -Force | Out-Null
+          'ok' | Set-Content "$env:GITHUB_WORKSPACE\w\x\y\z.txt"
+          Get-Content "$env:GITHUB_WORKSPACE\w\x\y\z.txt"
+          Remove-Item "$env:GITHUB_WORKSPACE\w" -Recurse -Force
+          'workspace write/delete OK'
+
+      - uses: actions/checkout@v5
+        with:
+          path: co-https
