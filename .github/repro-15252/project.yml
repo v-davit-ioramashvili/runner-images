@@ -1,0 +1,35 @@
+name: KbdProbe
+options:
+  bundleIdPrefix: org.example.repro15252
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: "NO"
+    GENERATE_INFOPLIST_FILE: "YES"
+    SWIFT_VERSION: "5.0"
+targets:
+  KbdProbe:
+    type: application
+    platform: iOS
+    sources: [App]
+    settings:
+      base:
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+  KbdProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: KbdProbe
+    settings:
+      base:
+        TEST_TARGET_NAME: KbdProbe
+schemes:
+  KbdProbe:
+    build:
+      targets:
+        KbdProbe: all
+        KbdProbeUITests: [test]
+    test:
+      targets: [KbdProbeUITests]

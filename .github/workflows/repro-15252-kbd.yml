@@ -1,0 +1,159 @@
+name: Repro 15252 - Simulator kbd start after boot (macos-15 arm64)
+
+# https://github.com/actions/runner-images/issues/15252
+# Fresh iPhone 17 Pro / iOS 26.2 Simulator with Xcode 26.3, boot + bootstatus -b,
+# then one tap + one typeText. Times when com.apple.TextInput.kbd goes from
+# xpcproxy_sim to running and when the typed value lands, for three variants:
+#   cold      - type right after bootstatus (reporter's setup)
+#   wait60    - sleep 60 s after bootstatus
+#   kickstart - start the kbd service with launchctl before typing
+# The app is built before boot so the boot -> type gap is as short as possible.
+
+on:
+  push:
+    branches: [repro/15252-kbd]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [cold, wait60, kickstart]
+        run: [1, 2, 3, 4, 5, 6]
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      XCODE: "26.3"
+      RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+      DEVTYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro
+      PROBE: .github/repro-15252
+      OUT: ${{ github.workspace }}/out
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Environment
+        run: |
+          mkdir -p "$OUT"
+          now() { python3 -c 'import time;print(f"{time.time():.3f}")'; }
+          echo "jobStart=$(now)" >> "$OUT/times.env"
+          echo "image=$ImageOS $ImageVersion"; sw_vers; uname -m
+          echo "ncpu=$(sysctl -n hw.ncpu) memGB=$(( $(sysctl -n hw.memsize) / 1073741824 ))"
+          sudo xcode-select -s /Applications/Xcode_${XCODE}.app
+          xcodebuild -version
+          CS=$(defaults read /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/Info.plist CFBundleVersion)
+          echo "CoreSimulator=$CS"
+          { echo "image=$ImageVersion"; echo "coresim=$CS"; echo "ncpu=$(sysctl -n hw.ncpu)"; } >> "$OUT/times.env"
+          nohup python3 "$PROBE/poll.py" "$OUT/poll.log" > /dev/null 2>&1 &
+          echo $! > "$OUT/poll.pid"
+
+      - name: First simctl call (timed, see #15247)
+        run: |
+          now() { python3 -c 'import time;print(f"{time.time():.3f}")'; }
+          a=$(now); xcrun simctl list -j devices > /dev/null; b=$(now)
+          xcrun simctl list -j devices > /dev/null; c=$(now)
+          echo "firstSimctlSec=$(python3 -c "print(round($b-$a,1))")" >> "$OUT/times.env"
+          echo "secondSimctlSec=$(python3 -c "print(round($c-$b,1))")" >> "$OUT/times.env"
+          tail -2 "$OUT/times.env"
+
+      - name: Build probe app (before boot)
+        run: |
+          brew install xcodegen > /dev/null
+          cd "$PROBE" && xcodegen generate --quiet
+          xcodebuild build-for-testing -project KbdProbe.xcodeproj -scheme KbdProbe \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/dd" -quiet
+
+      - name: Create and boot fresh Simulator
+        run: |
+          now() { python3 -c 'import time;print(f"{time.time():.3f}")'; }
+          UDID=$(xcrun simctl create "kbd-probe" "$DEVTYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          a=$(now); xcrun simctl boot "$UDID"; xcrun simctl bootstatus "$UDID" -b > "$OUT/bootstatus.log"; b=$(now)
+          echo "bootDone=$b" >> "$OUT/times.env"
+          echo "bootSec=$(python3 -c "print(round($b-$a,1))")" >> "$OUT/times.env"
+          tail -1 "$OUT/times.env"
+
+      - name: Scenario prep (${{ matrix.scenario }})
+        run: |
+          now() { python3 -c 'import time;print(f"{time.time():.3f}")'; }
+          lim() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          case "${{ matrix.scenario }}" in
+            cold) ;;
+            wait60) sleep 60 ;;
+            kickstart)
+              a=$(now)
+              rc=0; lim 60 xcrun simctl spawn "$UDID" launchctl kickstart system/com.apple.TextInput.kbd || rc=$?
+              b=$(now)
+              echo "kickstartRc=$rc kickstartSec=$(python3 -c "print(round($b-$a,1))")"
+              echo "kickstartRc=$rc" >> "$OUT/times.env"
+              echo "kickstartSec=$(python3 -c "print(round($b-$a,1))")" >> "$OUT/times.env"
+              # Wait for a running kbd process (not the xpcproxy_sim stage), up to 90 s.
+              for i in $(seq 1 360); do
+                if ps -axo command= | grep -v xpcproxy | grep -qE 'TextInput.*/kbd( |$)|/kbd$'; then break; fi
+                sleep 0.25
+              done
+              c=$(now)
+              echo "kbdUpAfterKickstartSec=$(python3 -c "print(round($c-$a,1))")" >> "$OUT/times.env"
+              tail -1 "$OUT/times.env"
+              ;;
+          esac
+          echo "prepDone=$(now)" >> "$OUT/times.env"
+        continue-on-error: true
+
+      - name: One tap + one typeText
+        run: |
+          xcodebuild test-without-building -project "$PROBE/KbdProbe.xcodeproj" -scheme KbdProbe \
+            -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/dd" 2>&1 | tee "$OUT/test.log" | grep -E 'KBDPROBE|Test Case|error:' || true
+
+      - name: Simulator-side kbd log and launchd state
+        if: always()
+        run: |
+          lim() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          kill "$(cat "$OUT/poll.pid")" 2>/dev/null || true
+          lim 120 xcrun simctl spawn "$UDID" log show --style compact --last 20m \
+            --predicate 'eventMessage CONTAINS[c] "TextInput.kbd" OR process == "kbd"' > "$OUT/sim-kbd-log.txt" 2>&1 || echo "log show rc=$?"
+          lim 60 xcrun simctl spawn "$UDID" launchctl print system/com.apple.TextInput.kbd > "$OUT/launchctl-print.txt" 2>&1 || echo "launchctl print rc=$?"
+          head -40 "$OUT/launchctl-print.txt"
+          echo "--- sim log (first 60 lines)"; head -60 "$OUT/sim-kbd-log.txt"
+
+      - name: Summarise
+        if: always()
+        run: |
+          python3 - "$OUT" "${{ matrix.scenario }}" "${{ matrix.run }}" <<'EOF' | tee "$OUT/result.txt" >> "$GITHUB_STEP_SUMMARY"
+          import datetime, re, sys
+          out, scen, run = sys.argv[1:4]
+          env = {}
+          for line in open(f"{out}/times.env"):
+              k, _, v = line.strip().partition("=")
+              env[k] = v
+          probe = next((l.strip() for l in open(f"{out}/test.log") if "KBDPROBE" in l and "print(" not in l), "KBDPROBE missing")
+          probe = probe[probe.find("KBDPROBE"):]
+          # kbd PID timeline from the host poller: first seen (xpcproxy_sim) -> first seen as kbd binary
+          first, running = {}, {}
+          for l in open(f"{out}/poll.log"):
+              m = re.match(r"(\S+) PROC pid=(\d+) ppid=\d+ cmd=(.*)", l)
+              if not m:
+                  continue
+              t, pid, cmd = m.groups()
+              first.setdefault(pid, t)
+              if "xpcproxy" not in cmd and re.search(r"/kbd( |$)", cmd):
+                  running.setdefault(pid, t)
+          p = lambda s: datetime.datetime.fromisoformat(s)
+          kbd = [(first[pid], running[pid], pid) for pid in running]
+          kbd.sort()
+          kbdtxt = "none-seen"
+          if kbd:
+              f, r, pid = kbd[0]
+              kbdtxt = f"pid={pid} proxySeen={f} running={r} proxyToRunningSec={(p(r)-p(f)).total_seconds():.2f}"
+              if "bootDone" in env:
+                  bd = datetime.datetime.fromtimestamp(float(env["bootDone"]), datetime.timezone.utc)
+                  kbdtxt += f" bootToRunningSec={(p(r)-bd).total_seconds():.1f}"
+          keys = ["image", "coresim", "ncpu", "firstSimctlSec", "secondSimctlSec", "bootSec", "kickstartRc", "kickstartSec", "kbdUpAfterKickstartSec"]
+          print(f"RESULT scenario={scen} run={run} " + " ".join(f"{k}={env[k]}" for k in keys if k in env) + f" | kbd {kbdtxt} | {probe}")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kbd-${{ matrix.scenario }}-${{ matrix.run }}
+          path: out/
