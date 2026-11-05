@@ -18,7 +18,10 @@ final class KbdProbeUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 60))
         let tapAt = Date()
         field.tap()
-        let kbShown = app.keyboards.firstMatch.waitForExistence(timeout: 60)
+        // KBD_NOWAIT=1 (TEST_RUNNER_KBD_NOWAIT) types straight after the tap, without
+        // waiting for XCUITest's keyboard element, like the #15252 reporter.
+        let noWait = ProcessInfo.processInfo.environment["KBD_NOWAIT"] == "1"
+        let kbShown = noWait ? false : app.keyboards.firstMatch.waitForExistence(timeout: 60)
         let kbAt = Date()
         field.typeText("Table Test")
         let typedAt = Date()

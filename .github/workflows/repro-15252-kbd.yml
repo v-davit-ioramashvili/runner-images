@@ -7,6 +7,8 @@ name: Repro 15252 - Simulator kbd start after boot (macos-15 arm64)
 #   cold      - type right after bootstatus (reporter's setup)
 #   wait60    - sleep 60 s after bootstatus
 #   kickstart - start the kbd service with launchctl before typing
+#   nowait    - like cold, but typeText right after the tap without waiting for
+#               XCUITest's keyboard element (the reporter's order)
 # The app is built before boot so the boot -> type gap is as short as possible.
 
 on:
@@ -19,8 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [cold, wait60, kickstart]
-        run: [1, 2, 3, 4, 5, 6]
+        # cold/wait60/kickstart ran in 42014190720; this pass adds nowait only.
+        scenario: [nowait]
+        run: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: macos-15
     timeout-minutes: 40
     env:
@@ -78,7 +81,7 @@ jobs:
           now() { python3 -c 'import time;print(f"{time.time():.3f}")'; }
           lim() { perl -e 'alarm shift; exec @ARGV' "$@"; }
           case "${{ matrix.scenario }}" in
-            cold) ;;
+            cold|nowait) ;;
             wait60) sleep 60 ;;
             kickstart)
               a=$(now)
@@ -102,6 +105,7 @@ jobs:
 
       - name: One tap + one typeText
         run: |
+          [ "${{ matrix.scenario }}" = nowait ] && export TEST_RUNNER_KBD_NOWAIT=1
           xcodebuild test-without-building -project "$PROBE/KbdProbe.xcodeproj" -scheme KbdProbe \
             -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/dd" 2>&1 | tee "$OUT/test.log" | grep -E 'KBDPROBE|Test Case|error:' || true
 
