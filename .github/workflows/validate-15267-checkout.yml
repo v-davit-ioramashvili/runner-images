@@ -1,0 +1,81 @@
+name: validate-15267-checkout
+on:
+  push:
+    branches: [validate/15267-disk]
+    paths: ['.github/workflows/validate-15267-checkout.yml']
+permissions:
+  contents: read
+env:
+  FREE_GB: 18
+jobs:
+  checkout:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-24.04, ubuntu-26.04]
+        variant: [full, full-18g, sparse-18g, free-18g]
+        sample: [1, 2]
+        exclude:
+          - variant: full
+            sample: 2
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 90
+    name: ${{ matrix.variant }} ${{ matrix.image }} ${{ matrix.sample }}
+    steps:
+      - name: Measure start
+        run: |
+          df -h /
+          echo "::notice title=start::$(df -B1 --output=size,avail / | tail -1)"
+      - name: Leave FREE_GB free on root
+        if: matrix.variant != 'full'
+        run: |
+          avail=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          fallocate -l $((avail - FREE_GB * 1000000000)) "$HOME/ballast"
+          df -h /
+          echo "::notice title=after-ballast::$(df -B1 --output=size,avail / | tail -1)"
+      - name: Free preinstalled tools
+        if: matrix.variant == 'free-18g'
+        run: |
+          before=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          start=$(date +%s)
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune -a -f >/dev/null 2>&1 || true
+          after=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          secs=$(( $(date +%s) - start ))
+          df -h /
+          echo "FREED freed_gb=$(awk -v a=$after -v b=$before 'BEGIN{printf "%.1f",(a-b)/1000000000}') avail_gb=$(awk -v a=$after 'BEGIN{printf "%.1f",a/1000000000}') seconds=$secs"
+      - name: Reporter checkout, depth 1
+        if: matrix.variant != 'sparse-18g'
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: rdje/fsmgen
+          ref: b88ac70cd9e6ab77978bedcf4b3bfbe05a0fee67
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reporter checkout, sparse without docs/audits
+        if: matrix.variant == 'sparse-18g'
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: rdje/fsmgen
+          ref: b88ac70cd9e6ab77978bedcf4b3bfbe05a0fee67
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/docs/audits/
+          sparse-checkout-cone-mode: false
+      - name: Measure end
+        if: always()
+        run: |
+          set +e
+          cd "$GITHUB_WORKSPACE"
+          df -h /
+          g=$(du -sb .git 2>/dev/null | cut -f1)
+          w=$(du -sb --exclude=.git . 2>/dev/null | cut -f1)
+          f=$(find . -path ./.git -prune -o -type f -print | wc -l)
+          a=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          [ -d docs/audits ] && audits=present || audits=absent
+          echo "::notice title=end::git=$g tree=$w files=$f avail=$a audits=$audits"
+          echo "MEASURE variant=${{ matrix.variant }} image=${{ matrix.image }} git_bytes=$g tree_bytes=$w files=$f avail_bytes=$a audits=$audits"
