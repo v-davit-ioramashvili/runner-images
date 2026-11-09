@@ -1,0 +1,167 @@
+name: Validate 15272 provjobd metadata
+
+# Metadata-only check. Never launches, modifies, hashes, copies or uploads the file.
+# Process data is limited to name, ids, path and creation time: no command lines or environment.
+
+on:
+  push:
+    branches:
+      - repro-15272
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  inspect:
+    name: ${{ matrix.image }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-2022, windows-2025]
+        mode: [default, protections-on]
+    steps:
+      - name: Inspect provjobd metadata
+        shell: pwsh
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          function Section($text) { Write-Host "`n===== $text ($((Get-Date).ToUniversalTime().ToString('u'))) =====" }
+          function Show($object) { if ($object) { $object | Format-List | Out-String -Width 500 | Write-Host } else { Write-Host '(none)' } }
+
+          function Get-ProcessSnapshot {
+              Get-CimInstance -ClassName Win32_Process -Property Name, ProcessId, ParentProcessId, ExecutablePath, CreationDate |
+                  Select-Object Name, ProcessId, ParentProcessId, ExecutablePath, CreationDate
+          }
+
+          function Show-Processes {
+              $all = @(Get-ProcessSnapshot)
+              $byId = @{}
+              foreach ($process in $all) { $byId[[int]$process.ProcessId] = $process }
+              foreach ($hit in $all | Where-Object Name -match '^(provjobd|hosted-compute-agent)') {
+                  Write-Host "--- chain for $($hit.Name) pid $($hit.ProcessId)"
+                  $current = $hit
+                  for ($depth = 0; $current -and $depth -lt 8; $depth++) {
+                      Write-Host ("[{0}] {1} pid={2} ppid={3} created={4} path={5}" -f $depth, $current.Name, $current.ProcessId, $current.ParentProcessId, $current.CreationDate.ToUniversalTime().ToString('u'), $current.ExecutablePath)
+                      $current = $byId[[int]$current.ParentProcessId]
+                  }
+              }
+          }
+
+          function Get-TargetPaths {
+              $fromProcess = @(Get-ProcessSnapshot | Where-Object Name -match '^provjobd' | ForEach-Object ExecutablePath)
+              $fromDisk = @(Get-ChildItem -Path 'C:\Users\*\AppData\Local\Temp', 'C:\Windows\Temp' -Filter 'provjobd*' -Force -ErrorAction SilentlyContinue | ForEach-Object FullName)
+              @($fromProcess + $fromDisk | Where-Object { $_ } | Sort-Object -Unique)
+          }
+
+          function Show-Files {
+              $items = @()
+              foreach ($path in Get-TargetPaths) { $items += Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+              $items += Get-ChildItem -LiteralPath 'C:\ProgramData\GitHub\HostedComputeAgent' -Force -ErrorAction SilentlyContinue
+              $items | Select-Object FullName, Length, CreationTimeUtc, LastWriteTimeUtc, LastAccessTimeUtc | Format-Table -AutoSize | Out-String -Width 500 | Write-Host
+          }
+
+          function Show-Defender {
+              Show (Get-MpComputerStatus | Select-Object AMRunningMode, AMServiceEnabled, AntivirusEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled, OnAccessProtectionEnabled, AMProductVersion, AMEngineVersion, AntivirusSignatureVersion, AntivirusSignatureLastUpdated)
+              Show (Get-MpPreference | Select-Object DisableRealtimeMonitoring, DisableBehaviorMonitoring, DisableIOAVProtection, DisableAutoExclusions, SubmitSamplesConsent, MAPSReporting, ExclusionPath, ExclusionProcess, ExclusionExtension, LowThreatDefaultAction, ModerateThreatDefaultAction, HighThreatDefaultAction, SevereThreatDefaultAction, UnknownThreatDefaultAction)
+          }
+
+          function Show-Detections($label) {
+              Section "Detection history: $label"
+              Write-Host '[Get-MpThreatDetection]'
+              Show (Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object ThreatID, ProcessName, Resources, InitialDetectionTime, LastThreatStatusChangeTime, RemediationTime, ActionSuccess, ThreatStatusID, ThreatStatusErrorCode, CurrentThreatExecutionStatusID, DetectionSourceTypeID, DomainUser)
+              Write-Host '[Get-MpThreat]'
+              Show (Get-MpThreat -ErrorAction SilentlyContinue | Select-Object ThreatID, ThreatName, SeverityID, CategoryID, IsActive, DidThreatExecute, Resources)
+              Write-Host '[Defender events 1116-1119 and 5001]'
+              Show (Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 1116, 1117, 1118, 1119, 5001 } -MaxEvents 30 -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message)
+          }
+
+          function Read-Signature($path) {
+              Write-Host "--- signature read: $path"
+              try {
+                  $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+                  Show ([pscustomobject]@{
+                      Status        = $signature.Status
+                      StatusMessage = $signature.StatusMessage
+                      SignatureType = $signature.SignatureType
+                      IsOSBinary    = $signature.IsOSBinary
+                      Signer        = $signature.SignerCertificate.Subject
+                      Issuer        = $signature.SignerCertificate.Issuer
+                      Thumbprint    = $signature.SignerCertificate.Thumbprint
+                      NotBefore     = $signature.SignerCertificate.NotBefore
+                      NotAfter      = $signature.SignerCertificate.NotAfter
+                      Timestamper   = $signature.TimeStamperCertificate.Subject
+                  })
+              } catch {
+                  Write-Host ("read failed: {0} HResult=0x{1:X8} {2}" -f $_.Exception.GetType().FullName, $_.Exception.HResult, $_.Exception.Message)
+              }
+          }
+
+          function Read-Signatures {
+              foreach ($path in Get-TargetPaths) { Read-Signature $path }
+              $agent = Get-ProcessSnapshot | Where-Object Name -match '^hosted-compute-agent' | Select-Object -First 1 -ExpandProperty ExecutablePath
+              if ($agent) { Read-Signature $agent }
+          }
+
+          Section "Runner"
+          Write-Host "Mode: $env:MODE  ImageOS: $env:ImageOS  ImageVersion: $env:ImageVersion"
+          Show (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, InstallDate, LastBootUpTime)
+
+          Section 'Processes'
+          Show-Processes
+          Section 'Files'
+          Show-Files
+          Section 'Defender state on arrival'
+          Show-Defender
+          Show-Detections 'on arrival'
+
+          if ($env:MODE -eq 'default') {
+              Section 'Signature read with Defender as shipped'
+              Read-Signatures
+              Show-Detections 'after signature read'
+          } else {
+              Section 'Applying NeverSend and NoAction before enabling protections'
+              Set-MpPreference -SubmitSamplesConsent NeverSend -MAPSReporting Disabled
+              Set-MpPreference -LowThreatDefaultAction NoAction -ModerateThreatDefaultAction NoAction -HighThreatDefaultAction NoAction -SevereThreatDefaultAction NoAction -UnknownThreatDefaultAction NoAction
+              $preference = Get-MpPreference
+              $actions = @($preference.LowThreatDefaultAction, $preference.ModerateThreatDefaultAction, $preference.HighThreatDefaultAction, $preference.SevereThreatDefaultAction, $preference.UnknownThreatDefaultAction)
+              if ($preference.SubmitSamplesConsent -ne 2 -or $preference.MAPSReporting -ne 0 -or @($actions | Where-Object { $_ -ne 9 }).Count -gt 0) {
+                  Show-Defender
+                  Write-Host 'Guard failed: protections left off so nothing can be uploaded or remediated.'
+                  exit 0
+              }
+
+              Section 'Enabling protections'
+              if ($preference.ExclusionPath) { Remove-MpPreference -ExclusionPath $preference.ExclusionPath }
+              Set-MpPreference -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -DisableArchiveScanning $false
+              Set-MpPreference -DisableRealtimeMonitoring $false
+              Show-Defender
+
+              Section 'Waiting 180 seconds without touching the file'
+              Start-Sleep -Seconds 180
+              Show-Detections 'protections on, file not touched'
+              Section 'Files after wait'
+              Show-Files
+
+              Section 'Signature read with shipped definitions'
+              Read-Signatures
+              Start-Sleep -Seconds 20
+              Show-Detections 'after signature read, shipped definitions'
+
+              Section 'Updating definitions'
+              Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Continue
+              Show-Defender
+
+              Section 'Signature read with updated definitions'
+              Read-Signatures
+              Start-Sleep -Seconds 20
+              Show-Detections 'after signature read, updated definitions'
+          }
+
+          Section 'Final state'
+          Show-Processes
+          Show-Files
+          exit 0
