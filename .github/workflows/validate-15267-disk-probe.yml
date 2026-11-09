@@ -1,0 +1,39 @@
+name: validate-15267-disk-probe
+on:
+  push:
+    branches: [validate/15267-disk]
+    paths: ['.github/workflows/validate-15267-disk-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        image: [ubuntu-24.04, ubuntu-26.04, ubuntu-latest]
+        sample: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 5
+    steps:
+      - name: Disk layout at job start
+        run: |
+          set +e
+          echo "--- nproc / memory"; nproc; free -h
+          echo "--- df"; df -h; df -i /
+          echo "--- lsblk"; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL
+          echo "--- findmnt / and /mnt"; findmnt /; findmnt /mnt
+          echo "--- /mnt"; ls -la /mnt
+          echo "--- swap"; swapon --show
+          echo "--- fstab"; cat /etc/fstab
+          echo "--- dmi"; cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name
+          echo "--- reserved blocks"; dev=$(findmnt -no SOURCE /); sudo tune2fs -l "$(readlink -f "$dev")" 2>/dev/null | grep -iE 'block count|block size'
+          gb() { awk -v b="$1" 'BEGIN{printf "%.1f", b/1000000000}'; }
+          rs=$(df -B1 --output=size / | tail -1 | tr -d ' ')
+          ra=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          ri=$(df --output=iavail / | tail -1 | tr -d ' ')
+          if mountpoint -q /mnt; then
+            ms=$(df -B1 --output=size /mnt | tail -1 | tr -d ' '); ma=$(df -B1 --output=avail /mnt | tail -1 | tr -d ' ')
+            mnt="mounted size_gb=$(gb "$ms") avail_gb=$(gb "$ma") dev=$(findmnt -no SOURCE /mnt)"
+          elif [ -d /mnt ]; then mnt="dir_only_on_root"; else mnt="absent"; fi
+          echo "RESULT label=${{ matrix.image }} os=$ImageOS ver=$ImageVersion nproc=$(nproc) root_size_gb=$(gb "$rs") root_avail_gb=$(gb "$ra") root_iavail=$ri vendor=$(tr ' ' '_' </sys/class/dmi/id/sys_vendor) product=$(tr ' ' '_' </sys/class/dmi/id/product_name) mnt=$mnt"

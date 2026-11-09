@@ -1,0 +1,37 @@
+name: validate-15267-enospc-logs
+on:
+  push:
+    branches: [validate/15267-disk]
+    paths: ['.github/workflows/validate-15267-enospc-logs.yml']
+permissions:
+  contents: read
+jobs:
+  fill:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-24.04, ubuntu-26.04]
+        variant: [spam, release]
+        sample: [1,2,3]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 15
+    name: fill ${{ matrix.image }} ${{ matrix.variant }} ${{ matrix.sample }}
+    steps:
+      - name: Before
+        run: |
+          df -h /
+          echo "::notice title=before::$(df -h --output=size,used,avail / | tail -1)"
+      - name: Fill root and keep logging
+        run: |
+          set +e
+          avail=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          fallocate -l "$avail" "$HOME/ballast1"
+          dd if=/dev/zero of="$HOME/ballast2" bs=1M status=none
+          dd if=/dev/zero of="$HOME/ballast3" bs=4K status=none
+          df -h /
+          line=$(head -c 1500 /dev/zero | tr '\0' 'x')
+          for i in $(seq 1 1200); do echo "log line $i $line"; sleep 0.05; done
+          if [ "${{ matrix.variant }}" = "release" ]; then rm -f "$HOME"/ballast*; df -h /; fi
+      - name: Later step
+        if: always()
+        run: echo "later step ran"; df -h /
