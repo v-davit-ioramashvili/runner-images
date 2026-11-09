@@ -39,3 +39,4 @@ jobs:
           echo "RESULT label=${{ matrix.image }} os=$ImageOS ver=$ImageVersion nproc=$(nproc) root_size_gb=$(gb "$rs") root_avail_gb=$(gb "$ra") root_iavail=$ri vendor=$(tr ' ' '_' </sys/class/dmi/id/sys_vendor) product=$(tr ' ' '_' </sys/class/dmi/id/product_name) mnt=$mnt"
 # trigger 2
 # trigger 15
+# trigger 30
