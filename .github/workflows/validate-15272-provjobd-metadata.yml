@@ -6,7 +6,7 @@ name: Validate 15272 provjobd metadata
 on:
   push:
     branches:
-      - validate/15272-provjobd-metadata
+      - repro-15272
   workflow_dispatch:
 
 permissions: {}
