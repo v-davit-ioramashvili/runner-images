@@ -1,0 +1,50 @@
+name: validate-disk-io-15265
+on:
+  push:
+    branches: ['validate/15265-macos-disk-load']
+permissions:
+  contents: read
+jobs:
+  stress:
+    name: ${{ matrix.os }} replica ${{ matrix.replica }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15]
+        replica: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          date -u +%s > "$RUNNER_TEMP/out/t0"
+          { sw_vers; uname -a; sysctl hw.memsize hw.ncpu hw.model; df -h; diskutil list; } | tee "$RUNNER_TEMP/out/env.txt"
+      - name: Sustained disk load
+        continue-on-error: true
+        run: |
+          ( while true; do { date -u +%H:%M:%S; df -g /System/Volumes/Data | tail -1; vm_stat | grep -E 'free|Swap'; } >> "$RUNNER_TEMP/out/samples.txt"; sleep 60; done ) &
+          sampler=$!
+          python3 stress/io_stress.py "$GITHUB_WORKSPACE/_io" 100 100 "$RUNNER_TEMP/out/report"
+          kill "$sampler" || true
+      - name: Collect kernel log
+        if: ${{ always() }}
+        run: |
+          cd "$RUNNER_TEMP/out"
+          start=$(date -r $(( $(cat t0) - 120 )) '+%Y-%m-%d %H:%M:%S')
+          sudo log show --start "$start" --style compact --predicate 'process == "kernel"' > kernel.log 2>&1 || true
+          grep -E 'IOStorageFamily|\(apfs\)|AppleVirtIOStorage' kernel.log > kernel-storage.log || true
+          gzip -f kernel.log
+          df -h /System/Volumes/Data | tee df.txt
+          eio=$(grep -cE 'disk[0-9]+(s[0-9]+)?: I/O error' kernel-storage.log || true)
+          errs=$(grep -cE 'cluster_push\(\) failed|cluster_pageout .*returned|trim_list failed' kernel-storage.log || true)
+          echo "EIO_LINES=$eio APFS_WRITE_ERRORS=$errs"
+          for f in report.*.json; do echo "$f: $(cat "$f")"; done
+          { echo "### ${{ matrix.os }} replica ${{ matrix.replica }}"; echo "EIO lines: $eio, APFS write errors: $errs"; sed -n '1,3p' env.txt; } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf "$GITHUB_WORKSPACE/_io" || true
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: disk-io-${{ matrix.os }}-${{ matrix.replica }}
+          path: ${{ runner.temp }}/out
