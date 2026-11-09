@@ -37,3 +37,4 @@ jobs:
             mnt="mounted size_gb=$(gb "$ms") avail_gb=$(gb "$ma") dev=$(findmnt -no SOURCE /mnt)"
           elif [ -d /mnt ]; then mnt="dir_only_on_root"; else mnt="absent"; fi
           echo "RESULT label=${{ matrix.image }} os=$ImageOS ver=$ImageVersion nproc=$(nproc) root_size_gb=$(gb "$rs") root_avail_gb=$(gb "$ra") root_iavail=$ri vendor=$(tr ' ' '_' </sys/class/dmi/id/sys_vendor) product=$(tr ' ' '_' </sys/class/dmi/id/product_name) mnt=$mnt"
+# trigger 2
