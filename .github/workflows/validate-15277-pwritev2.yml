@@ -1,0 +1,347 @@
+name: validate-15277-pwritev2
+
+on:
+  push:
+    branches: [validate/15277-pwritev2]
+
+jobs:
+  matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Build probe
+        continue-on-error: true
+        run: |
+          cat > pw.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <sys/syscall.h>
+          #include <sys/uio.h>
+          #include <sys/vfs.h>
+          #define F_APPEND 0x10
+          #define F_NOAPPEND 0x20
+          #define F_BOGUS 0x40000000
+          static const char *INITIAL = "it's not working!";
+          static const char *tag, *dir;
+          static char path[4096];
+          static const char *fsname(long t) {
+            switch ((unsigned long)t) {
+              case 0xEF53: return "ext4";
+              case 0x01021994: return "tmpfs";
+              case 0x794c7630: return "overlay";
+              case 0x58465342: return "xfs";
+              case 0x9123683E: return "btrfs";
+              default: return "other";
+            }
+          }
+          static int reset(void) {
+            int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+            if (fd < 0) return -1;
+            if (write(fd, INITIAL, strlen(INITIAL)) < 0) { close(fd); return -1; }
+            close(fd);
+            return 0;
+          }
+          static void readback(char *out, size_t n) {
+            int fd = open(path, O_RDONLY);
+            ssize_t r = fd < 0 ? 0 : read(fd, out, n - 1);
+            if (r < 0) r = 0;
+            out[r] = 0;
+            if (fd >= 0) close(fd);
+          }
+          static const char *klass(const char *c) {
+            if (!strcmp(c, "it's     working!")) return "POSITIONED";
+            if (!strcmp(c, "it's not working!   ")) return "APPENDED";
+            if (!strcmp(c, INITIAL)) return "UNCHANGED";
+            return "OTHER";
+          }
+          static void run(const char *name, int oflags, int rwf, const char *expect, int legacy) {
+            struct iovec iov = { (void *)"   ", 3 };
+            char content[128]; long ret; int err;
+            if (reset()) { printf("PW|%s|%s|%s|setup-failed|errno=%d\n", tag, dir, name, errno); return; }
+            int fd = open(path, oflags);
+            if (fd < 0) { printf("PW|%s|%s|%s|open-failed|errno=%d\n", tag, dir, name, errno); return; }
+            errno = 0;
+            if (legacy) ret = syscall(SYS_pwritev2, fd, &iov, 1, 5, F_APPEND);
+            else ret = syscall(SYS_pwritev2, fd, &iov, 1, 5UL, 0UL, rwf);
+            err = errno;
+            close(fd);
+            readback(content, sizeof content);
+            const char *k = ret < 0 ? "ERROR" : klass(content);
+            struct statfs s; statfs(dir, &s);
+            printf("PW|%s|%s|%s|%s|ret=%ld|errno=%d|%s|%s|[%s]\n", tag, dir, fsname(s.f_type), name, k, ret, err,
+                   strcmp(expect, k) ? (expect[0] == '-' ? "INFO" : "UNEXPECTED") : "ok", content);
+          }
+          int main(int argc, char **argv) {
+            tag = argv[1]; dir = argv[2];
+            snprintf(path, sizeof path, "%s/pw15277.%d", dir, getpid());
+            run("T1_append_noappend", O_WRONLY | O_APPEND, F_NOAPPEND, "POSITIONED", 0);
+            run("T2_rdwr_append_noappend", O_RDWR | O_APPEND, F_NOAPPEND, "POSITIONED", 0);
+            run("C1_append_noflag", O_WRONLY | O_APPEND, 0, "APPENDED", 0);
+            run("C2_plain_noflag", O_WRONLY, 0, "POSITIONED", 0);
+            run("C3_plain_rwfappend", O_WRONLY, F_APPEND, "APPENDED", 0);
+            run("C4_append_bogusflag", O_WRONLY | O_APPEND, F_BOGUS, "ERROR", 0);
+            run("L1_old_reproducer_call", O_WRONLY | O_APPEND, 0, "-", 1);
+            unlink(path);
+            return 0;
+          }
+          EOF
+          gcc -static -O1 -Wall -o pw pw.c
+          file pw
+      - name: Environment
+        continue-on-error: true
+        run: |
+          uname -a
+          grep PRETTY /etc/os-release
+          echo "ImageVersion=$ImageVersion"
+          df -hT
+          findmnt -lo TARGET,SOURCE,FSTYPE,OPTIONS | grep -vE ' (sysfs|proc|cgroup2|securityfs|debugfs|tracefs|fusectl|configfs|bpf|pstore|mqueue|hugetlbfs|devpts|efivarfs|binfmt_misc|autofs|nsfs|ramfs) '
+          lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,ROTA,MODEL
+          sudo tune2fs -l "$(findmnt -no SOURCE /)" | grep -E 'features|Default mount|Mount options'
+          grep -E 'CONFIG_OVERLAY_FS|CONFIG_EXT4_FS=|CONFIG_VIRTIO_FS|CONFIG_FUSE_FS' /boot/config-$(uname -r) || true
+          docker info | grep -iE 'Storage Driver|driver-type|Server Version|Backing Filesystem|Cgroup Version'
+          cat /etc/docker/daemon.json 2>/dev/null || echo "no daemon.json"
+          cat /etc/ld.so.preload 2>/dev/null || echo "no ld.so.preload"
+      - name: Bare filesystems
+        continue-on-error: true
+        run: |
+          W="$GITHUB_WORKSPACE/wsdir"; mkdir -p "$W"
+          ./pw host-workspace "$W"
+          ./pw host-tmp /tmp
+          ./pw host-devshm /dev/shm
+          if mountpoint -q /mnt; then sudo mkdir -p /mnt/pw && sudo chmod 777 /mnt/pw && ./pw host-mnt /mnt/pw; else echo "PW|host-mnt|/mnt|not-a-mountpoint"; ls -la /mnt || true; fi
+          ./pw host-runtmp "${RUNNER_TEMP}"
+      - name: Loop filesystems
+        continue-on-error: true
+        run: |
+          timeout 240 sudo apt-get install -y xfsprogs btrfs-progs >/dev/null 2>&1 || echo "tool install failed or timed out"
+          for f in ext4 xfs btrfs; do
+            command -v mkfs.$f >/dev/null || { echo "PW|loop-$f|skipped-no-tool"; continue; }
+            truncate -s 512M /tmp/$f.img
+            sudo mkfs.$f -q -f /tmp/$f.img 2>/dev/null || sudo mkfs.$f -q -F /tmp/$f.img
+            sudo mkdir -p /loop-$f
+            sudo mount -o loop /tmp/$f.img /loop-$f
+            sudo chmod 777 /loop-$f
+            ./pw loop-$f /loop-$f
+            findmnt -no FSTYPE,OPTIONS /loop-$f
+          done
+      - name: Native overlay
+        continue-on-error: true
+        run: |
+          B="$GITHUB_WORKSPACE/ov-ext4"; mkdir -p "$B"/{l,u,w,m}
+          sudo mount -t overlay overlay -o lowerdir="$B/l",upperdir="$B/u",workdir="$B/w" "$B/m"
+          sudo chmod 777 "$B/m"
+          ./pw overlay-on-ext4 "$B/m"
+          findmnt -no FSTYPE,OPTIONS "$B/m"
+          T=/dev/shm/ov; mkdir -p $T/{l,u,w,m}
+          sudo mount -t overlay overlay -o lowerdir=$T/l,upperdir=$T/u,workdir=$T/w $T/m
+          sudo chmod 777 $T/m
+          ./pw overlay-on-tmpfs $T/m
+          sudo umount "$B/m" $T/m
+      - name: Docker
+        continue-on-error: true
+        run: |
+          P="$GITHUB_WORKSPACE/pw"
+          mkdir -p "$GITHUB_WORKSPACE/bind"; chmod 777 "$GITHUB_WORKSPACE/bind"
+          docker pull -q ubuntu:24.04
+          docker run --rm -v "$P:/pw:ro" ubuntu:24.04 sh -c '/pw docker-rootfs /tmp; grep " / " /proc/self/mounts | cut -c1-120'
+          docker run --rm -v "$P:/pw:ro" -v "$GITHUB_WORKSPACE/bind:/b" ubuntu:24.04 /pw docker-bindmount /b
+          docker run --rm -v "$P:/pw:ro" -v vol15277:/v ubuntu:24.04 /pw docker-volume /v
+          docker run --rm -v "$P:/pw:ro" --tmpfs /t ubuntu:24.04 /pw docker-tmpfs /t
+          docker run --rm -v "$P:/pw:ro" ubuntu:24.04 /pw docker-devshm /dev/shm
+      - name: Old reproducer as published
+        continue-on-error: true
+        run: |
+          cat > old.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <stdio.h>
+          #include <sys/uio.h>
+          int main(void){
+          #ifdef RWF_NOAPPEND
+            printf("RWF_NOAPPEND from headers = 0x%x\n", RWF_NOAPPEND);
+          #else
+            puts("RWF_NOAPPEND not defined by headers, old reproducer falls back to 0x10");
+          #endif
+          #ifdef RWF_APPEND
+            printf("RWF_APPEND from headers = 0x%x\n", RWF_APPEND);
+          #endif
+            return 0; }
+          EOF
+          gcc -o old old.c && ./old
+
+  qemu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Prepare
+        continue-on-error: true
+        run: |
+          uname -r
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static zstd cpio e2fsprogs gcc >/dev/null
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm || true
+      - name: Build probe
+        continue-on-error: true
+        run: |
+          cat > pw.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <sys/syscall.h>
+          #include <sys/uio.h>
+          static const char *I = "it's not working!";
+          static char path[256];
+          static void run(const char *tag, const char *name, int o, int rwf) {
+            struct iovec iov = { (void *)"   ", 3 }; char c[128]; long r; int e;
+            int fd = open(path, O_CREAT|O_WRONLY|O_TRUNC, 0666); write(fd, I, strlen(I)); close(fd);
+            fd = open(path, o); errno = 0;
+            r = syscall(SYS_pwritev2, fd, &iov, 1, 5UL, 0UL, rwf); e = errno; close(fd);
+            fd = open(path, O_RDONLY); ssize_t n = read(fd, c, 127); close(fd); c[n<0?0:n] = 0;
+            printf("QPW|%s|%s|ret=%ld|errno=%d|[%s]\n", tag, name, r, e, c);
+          }
+          int main(int a, char **v) {
+            snprintf(path, sizeof path, "%s/f", v[2]);
+            run(v[1], "T1_append_noappend", O_WRONLY|O_APPEND, 0x20);
+            run(v[1], "C1_append_noflag", O_WRONLY|O_APPEND, 0);
+            run(v[1], "C3_plain_rwfappend", O_WRONLY, 0x10);
+            return 0;
+          }
+          EOF
+          gcc -static -O1 -o pw pw.c
+      - name: Fetch kernels
+        continue-on-error: true
+        run: |
+          mkdir -p k
+          add() { # name image-pkg modules-pkg
+            n=$1; mkdir -p k/$n/d
+            (cd k/$n && apt-get download "$2" "$3" 2>&1 | tail -2)
+            for d in k/$n/*.deb; do sudo dpkg-deb -x "$d" k/$n/d; done
+          }
+          R=$(uname -r)
+          add azure-running "linux-image-$R" "linux-modules-$R"
+          G=$(apt-cache depends linux-image-generic | grep -oE 'linux-image-(unsigned-)?[0-9][^ ]*-generic' | head -1)
+          V=${G#linux-image-}; V=${V#unsigned-}
+          add ubuntu-generic "$G" "linux-modules-$V"
+          echo "generic=$V"
+          m() { # name dir
+            n=$1; mkdir -p k/$n/d
+            L=$(curl -fsSL "https://kernel.ubuntu.com/mainline/$2/amd64/" | grep -oE 'linux-(image-unsigned|modules)-[0-9.-]+-generic_[^"<>]+_amd64\.deb' | sort -u)
+            echo "$L"
+            for f in $L; do curl -fsSL -o "k/$n/$f" "https://kernel.ubuntu.com/mainline/$2/amd64/$f"; done
+            for d in k/$n/*.deb; do sudo dpkg-deb -x "$d" k/$n/d; done
+          }
+          LATEST=$(curl -fsSL https://kernel.ubuntu.com/mainline/ | grep -oE 'v7\.[0-9]+(\.[0-9]+)?/' | tr -d / | sort -uV | tail -1)
+          echo "latest mainline=$LATEST"
+          m mainline-7.0 v7.0 || echo "mainline 7.0 fetch failed"
+          m mainline-latest "$LATEST" || echo "mainline latest fetch failed"
+          sudo chown -R "$USER" k
+          ls k/*/d/boot | head -40
+      - name: Boot and test
+        continue-on-error: true
+        run: |
+          truncate -s 64M ext4.img; mkfs.ext4 -q -F ext4.img
+          for n in $(ls k); do
+            V=$(ls k/$n/d/boot/vmlinuz-* 2>/dev/null | head -1)
+            [ -n "$V" ] || { echo "QPW|$n|no-vmlinuz"; continue; }
+            KV=${V##*vmlinuz-}
+            rm -rf ir; mkdir -p ir/{bin,proc,sys,dev,t,e,mods,m}
+            cp /usr/bin/busybox ir/bin/busybox || cp /bin/busybox ir/bin/busybox
+            cp pw ir/pw; cp ext4.img ir/ext4.img
+            for mod in overlay loop; do
+              f=$(find k/$n/d/lib/modules/$KV -name "$mod.ko*" | head -1)
+              if [ -n "$f" ]; then
+                case "$f" in *.zst) zstd -q -d -o ir/mods/$mod.ko "$f";; *) cp "$f" ir/mods/;; esac
+              fi
+            done
+            cat > ir/init <<EOF
+          #!/bin/busybox sh
+          /bin/busybox --install -s /bin
+          mount -t proc p /proc; mount -t sysfs s /sys; mount -t devtmpfs d /dev
+          echo "QPW|$n|boot|\$(uname -r)"
+          for m in /mods/*.ko; do insmod \$m || echo "QPW|$n|insmod-failed|\$m"; done
+          mount -t tmpfs t /t; /pw $n-tmpfs /t
+          mkdir -p /t/l /t/u /t/w
+          mount -t overlay o -o lowerdir=/t/l,upperdir=/t/u,workdir=/t/w /m && /pw $n-overlay-on-tmpfs /m
+          umount /m
+          mount -o loop /ext4.img /e && /pw $n-ext4 /e
+          mkdir -p /e/l /e/u /e/w
+          mount -t overlay o -o lowerdir=/e/l,upperdir=/e/u,workdir=/e/w /m && /pw $n-overlay-on-ext4 /m
+          echo "QPW|$n|done"
+          poweroff -f
+          EOF
+            chmod +x ir/init
+            (cd ir && find . | cpio -o -H newc --quiet | gzip -1) > initrd-$n.gz
+            ACC="-accel tcg"; [ -w /dev/kvm ] && ACC="-accel kvm -cpu host"
+            timeout 300 qemu-system-x86_64 $ACC -m 2048 -smp 2 -kernel "$V" -initrd initrd-$n.gz -append "console=ttyS0 panic=-1 loglevel=3" -nographic -no-reboot < /dev/null 2>&1 | tr -d '\r' | grep -E 'QPW|Kernel panic|not syncing' || echo "QPW|$n|no-output"
+          done
+
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Download sources
+        continue-on-error: true
+        run: |
+          R=$(uname -r); . /etc/os-release; C=$VERSION_CODENAME
+          sudo tee /etc/apt/sources.list.d/deb-src-15277.sources >/dev/null <<EOF
+          Types: deb-src
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: $C $C-updates $C-security
+          Components: main
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update -qq
+          S=$(dpkg-query -W -f='${source:Package}' "linux-image-$R" 2>/dev/null); S=${S/linux-signed-/}
+          [ -n "$S" ] || S=$(apt-cache show "linux-image-$R" | awk '/^Source:/{print $2; exit}')
+          S=${S/linux-signed-/}
+          if [ "$S" = "linux-azure" ]; then G=linux; else G=${S/azure/hwe}; fi
+          echo "azure source=$S generic source=$G running=$R"
+          mkdir -p a g
+          (cd a && timeout 1200 apt-get source -qq --only-source "$S" 2>&1 | tail -3)
+          (cd g && timeout 1200 apt-get source -qq --only-source "$G" 2>&1 | tail -3)
+          ls a g
+      - name: Compare
+        continue-on-error: true
+        run: |
+          A=$(ls -d a/*/ | head -1); G=$(ls -d g/*/ | head -1)
+          echo "azure tree=$A generic tree=$G"
+          for f in include/uapi/linux/fs.h include/linux/fs.h fs/read_write.c fs/backing-file.c fs/overlayfs/file.c mm/filemap.c fs/ext4/file.c mm/shmem.c; do
+            if diff -q "$A$f" "$G$f" >/dev/null 2>&1; then echo "SRC|same|$f"; else echo "SRC|DIFF|$f"; diff -u "$G$f" "$A$f" | head -60; fi
+          done
+          echo "=== RWF_NOAPPEND in azure tree"
+          grep -rn 'RWF_NOAPPEND' "$A"include "$A"fs "$A"mm | cut -c1-200
+          echo "=== kiocb_set_rw_flags (azure)"
+          awk '/kiocb_set_rw_flags/,/^}/' "$A"include/linux/fs.h | head -50
+          echo "=== iocb_to_rw_flags (azure)"
+          grep -n -A4 'iocb_to_rw_flags' "$A"include/linux/fs.h | head -20
+          echo "=== backing_file_write_iter (azure)"
+          awk '/^ssize_t backing_file_write_iter/,/^}/' "$A"fs/backing-file.c | head -70
+          echo "=== ovl_write_iter (azure)"
+          awk '/^static ssize_t ovl_write_iter/,/^}/' "$A"fs/overlayfs/file.c | head -50
+          echo "=== realfile open flags (azure)"
+          grep -n 'OVL_OPEN_FLAGS\|f_flags\|O_APPEND' "$A"fs/overlayfs/file.c | head
+          echo "=== IOCB_APPEND (azure)"
+          grep -n 'IOCB_APPEND' "$A"include/linux/fs.h | head
+          echo "=== sync vfs_iter_write path"
+          awk '/^ssize_t vfs_iter_write/,/^}/' "$A"fs/read_write.c | head -30
+          awk '/^static ssize_t do_iter_readv_writev|^static ssize_t do_iter_write|^ssize_t do_iter_write/,/^}/' "$A"fs/read_write.c | head -50
