@@ -77,7 +77,7 @@ jobs:
             readback(content, sizeof content);
             const char *k = ret < 0 ? "ERROR" : klass(content);
             struct statfs s; statfs(dir, &s);
-            printf("PW|%s|%s|%s|%s|ret=%ld|errno=%d|%s|%s|[%s]\n", tag, dir, fsname(s.f_type), name, k, ret, err,
+            printf("PW|%s|%s|%s|%s|%s|ret=%ld|errno=%d|%s|[%s]\n", tag, dir, fsname(s.f_type), name, k, ret, err,
                    strcmp(expect, k) ? (expect[0] == '-' ? "INFO" : "UNEXPECTED") : "ok", content);
           }
           int main(int argc, char **argv) {
