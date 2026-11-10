@@ -235,7 +235,8 @@ jobs:
           }
           R=$(uname -r)
           add azure-running "linux-image-$R" "linux-modules-$R"
-          G=$(apt-cache depends linux-image-generic | grep -oE 'linux-image-(unsigned-)?[0-9][^ ]*-generic' | head -1)
+          . /etc/os-release; M=linux-image-generic-hwe-$VERSION_ID; apt-cache show $M >/dev/null 2>&1 || M=linux-image-generic; echo "meta=$M"
+          G=$(apt-cache depends $M | grep -oE 'linux-image-(unsigned-)?[0-9][^ ]*-generic' | head -1)
           V=${G#linux-image-}; V=${V#unsigned-}
           add ubuntu-generic "$G" "linux-modules-$V"
           echo "generic=$V"
@@ -264,7 +265,7 @@ jobs:
             cp /usr/bin/busybox ir/bin/busybox || cp /bin/busybox ir/bin/busybox
             cp pw ir/pw; cp ext4.img ir/ext4.img
             for mod in overlay loop; do
-              f=$(find k/$n/d/lib/modules/$KV -name "$mod.ko*" | head -1)
+              f=$(find k/$n/d/lib/modules/$KV k/$n/d/usr/lib/modules/$KV -name "$mod.ko*" 2>/dev/null | head -1)
               if [ -n "$f" ]; then
                 case "$f" in *.zst) zstd -q -d -o ir/mods/$mod.ko "$f";; *) cp "$f" ir/mods/;; esac
               fi
@@ -311,9 +312,9 @@ jobs:
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
           sudo apt-get update -qq
-          S=$(dpkg-query -W -f='${source:Package}' "linux-image-$R" 2>/dev/null); S=${S/linux-signed-/}
+          S=$(dpkg-query -W -f='${source:Package}' "linux-image-$R" 2>/dev/null); S=${S/signed-/}
           [ -n "$S" ] || S=$(apt-cache show "linux-image-$R" | awk '/^Source:/{print $2; exit}')
-          S=${S/linux-signed-/}
+          S=${S/signed-/}
           if [ "$S" = "linux-azure" ]; then G=linux; else G=${S/azure/hwe}; fi
           echo "azure source=$S generic source=$G running=$R"
           mkdir -p a g
