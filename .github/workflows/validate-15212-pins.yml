@@ -1,0 +1,203 @@
+# TEMPORARY - validation aid for the #15212 version pinning review. Not for upstream.
+#   vcpkg-arm64   : reproduce why the vcpkg pin exists, then run the real install-vcpkg.sh
+#                   from this branch (no pin, no VCPKG_FORCE_SYSTEM_BINARIES) and build a
+#                   manifest project against the image's CMake 3.31.6.
+#   cmake4-compat : show which cmake_minimum_required values CMake 4.4.5 still rejects.
+#   llvm-arm64    : run the real Install-LLVM.ps1 with llvm.version "22.*".
+#   pins          : schema check + pin checker over the edited toolsets.
+
+name: validate-15212-pins
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/15212-pins'
+
+jobs:
+  vcpkg-arm64:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04-arm
+            toolset: toolset-2204-arm64.json
+          - runner: ubuntu-24.04-arm
+            toolset: toolset-2404-arm64.json
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline - what the image ships today
+        run: |
+          uname -m
+          cmake --version | head -1
+          echo "VCPKG_FORCE_SYSTEM_BINARIES='${VCPKG_FORCE_SYSTEM_BINARIES:-}'"
+          echo "image vcpkg commit: $(git -C "$VCPKG_INSTALLATION_ROOT" log -1 --format='%h %cs')"
+          grep -n VCPKG /etc/environment || true
+
+      - name: Repro - vcpkg master + FORCE_SYSTEM_BINARIES + CMake 3.31.6 (expected to fail)
+        id: repro
+        continue-on-error: true
+        run: |
+          git clone -q --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg-master"
+          "$RUNNER_TEMP/vcpkg-master/bootstrap-vcpkg.sh" -disableMetrics
+          set +e
+          VCPKG_FORCE_SYSTEM_BINARIES=1 "$RUNNER_TEMP/vcpkg-master/vcpkg" install sqlite3 zlib > "$RUNNER_TEMP/repro.log" 2>&1
+          rc=$?
+          tail -40 "$RUNNER_TEMP/repro.log"
+          exit $rc
+
+      - name: Repro evidence
+        if: always()
+        run: |
+          echo "repro outcome: ${{ steps.repro.outcome }}"
+          grep -rn "STRING_ENCODE" "$RUNNER_TEMP/repro.log" "$RUNNER_TEMP"/vcpkg-master/buildtrees/*/*.log 2>/dev/null | head -5 || true
+          rm -rf "$RUNNER_TEMP/vcpkg-master"
+
+      - name: Run the real install-vcpkg.sh from this branch on a clean vcpkg location
+        run: |
+          set -e
+          sudo mkdir -p /imagegeneration/helpers /imagegeneration/tests /imagegeneration/installers
+          sudo cp -r images/ubuntu/scripts/helpers/. /imagegeneration/helpers/
+          sudo cp -r images/ubuntu/scripts/tests/. /imagegeneration/tests/
+          sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" /imagegeneration/installers/toolset.json
+          echo "toolset .vcpkg = $(jq -c '.vcpkg' /imagegeneration/installers/toolset.json)"
+          # mirror a fresh build: no vcpkg yet and no env var from an earlier build
+          sudo rm -rf /usr/local/share/vcpkg /usr/local/bin/vcpkg
+          sudo sed -i '/^VCPKG_FORCE_SYSTEM_BINARIES=/d' /etc/environment
+          sudo env -u VCPKG_FORCE_SYSTEM_BINARIES \
+            HELPER_SCRIPTS=/imagegeneration/helpers \
+            INSTALLER_SCRIPT_FOLDER=/imagegeneration/installers \
+            bash -e images/ubuntu/scripts/build/install-vcpkg.sh
+
+      - name: Check the result of the install
+        run: |
+          set -e
+          if grep -q '^VCPKG_FORCE_SYSTEM_BINARIES=' /etc/environment; then echo "env var still written"; exit 1; fi
+          echo "installed vcpkg commit: $(git -C /usr/local/share/vcpkg log -1 --format='%h %cs') (master: $(git ls-remote https://github.com/microsoft/vcpkg refs/heads/master | cut -c1-10))"
+          vcpkg version | head -1
+
+      - name: Build a manifest project (sqlite3 + zlib) with the image's CMake 3.31.6
+        run: |
+          set -e
+          unset VCPKG_FORCE_SYSTEM_BINARIES
+          export VCPKG_INSTALLATION_ROOT=/usr/local/share/vcpkg
+          mkdir -p "$RUNNER_TEMP/probe" && cd "$RUNNER_TEMP/probe"
+          cat > vcpkg.json <<'EOF'
+          { "name": "probe", "version": "0.1.0", "dependencies": [ "sqlite3", "zlib" ] }
+          EOF
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(probe C)
+          find_package(unofficial-sqlite3 CONFIG REQUIRED)
+          find_package(ZLIB REQUIRED)
+          add_executable(probe main.c)
+          target_link_libraries(probe PRIVATE unofficial::sqlite3::sqlite3 ZLIB::ZLIB)
+          EOF
+          cat > main.c <<'EOF'
+          #include <stdio.h>
+          #include <sqlite3.h>
+          #include <zlib.h>
+          int main(void) { printf("sqlite %s, zlib %s\n", sqlite3_libversion(), zlibVersion()); return 0; }
+          EOF
+          cmake --version | head -1
+          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build
+          ./build/probe
+          echo "tools vcpkg downloaded:"; ls "$VCPKG_INSTALLATION_ROOT/downloads/tools" || true
+          file build/probe
+
+  cmake4-compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Get CMake 4.4.5
+        run: |
+          curl -fsSL https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "CMAKE4=$RUNNER_TEMP/cmake-4.4.5-linux-x86_64/bin/cmake" >> "$GITHUB_ENV"
+
+      - name: cmake_minimum_required matrix (3.31.6 vs 4.4.5)
+        run: |
+          printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' > "$RUNNER_TEMP/main.c"
+          echo "| cmake_minimum_required | CMake 3.31.6 | CMake 4.4.5 | 4.4.5 + CMAKE_POLICY_VERSION_MINIMUM=3.5 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for v in 2.8.12 3.0 3.4 3.5 3.9 3.10; do
+            d="$RUNNER_TEMP/p-$v"; mkdir -p "$d"; cp "$RUNNER_TEMP/main.c" "$d/"
+            printf 'cmake_minimum_required(VERSION %s)\nproject(p C)\nadd_executable(p main.c)\n' "$v" > "$d/CMakeLists.txt"
+            run() { if "$@" > "$d/out.log" 2>&1; then w=$(grep -c "CMake Deprecation Warning" "$d/out.log" || true); [ "$w" -gt 0 ] && echo "ok (deprecation warning)" || echo "ok"; else echo "**FAIL**"; fi; }
+            a=$(run cmake -S "$d" -B "$d/b3" --fresh)
+            b=$(run "$CMAKE4" -S "$d" -B "$d/b4" --fresh); grep -m1 -A2 "CMake Error" "$d/out.log" || true
+            c=$(run env CMAKE_POLICY_VERSION_MINIMUM=3.5 "$CMAKE4" -S "$d" -B "$d/b5" --fresh)
+            echo "| $v | $a | $b | $c |" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Real-world example - googletest release-1.10.0 (cmake_minimum_required 2.8.8)
+        run: |
+          git clone -q --depth 1 -b release-1.10.0 https://github.com/google/googletest "$RUNNER_TEMP/gt"
+          grep -m1 cmake_minimum_required "$RUNNER_TEMP/gt/CMakeLists.txt"
+          r3=ok; cmake -S "$RUNNER_TEMP/gt" -B "$RUNNER_TEMP/gt3" > /dev/null 2>&1 || r3=FAIL
+          r4=ok; "$CMAKE4" -S "$RUNNER_TEMP/gt" -B "$RUNNER_TEMP/gt4" > "$RUNNER_TEMP/gt4.log" 2>&1 || r4=FAIL
+          grep -m1 -A3 "CMake Error" "$RUNNER_TEMP/gt4.log" || true
+          echo "googletest 1.10.0 configure: CMake 3.31.6=$r3, CMake 4.4.5=$r4" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  llvm-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      IMAGE_FOLDER: ${{ github.workspace }}\image
+      TEMP_DIR: ${{ github.workspace }}\temp
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baseline
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "not an ARM64 runner" }
+          Write-Host "image clang: $((clang --version | Select-Object -First 1))"
+          Write-Host "toolset llvm.version on this branch: $((Get-Content .\images\windows\toolsets\toolset-win-11-vs2026-arm64.json -Raw | ConvertFrom-Json).llvm.version)"
+
+      - name: Run the real Install-LLVM.ps1 with the branch toolset (runs LLVM.Tests.ps1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path $env:IMAGE_FOLDER, $env:TEMP_DIR -Force | Out-Null
+          Copy-Item .\images\windows\toolsets\toolset-win-11-vs2026-arm64.json "$env:IMAGE_FOLDER\toolset.json"
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+          New-Item -ItemType Directory -Path C:\image\tests -Force | Out-Null
+          Copy-Item .\images\windows\scripts\tests\*.ps1 C:\image\tests -Force
+          if (Test-Path "C:\Program Files\LLVM") { Remove-Item "C:\Program Files\LLVM" -Recurse -Force }
+          . .\images\windows\scripts\build\Install-LLVM.ps1
+
+      - name: Confirm version and compile/run native ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "C:\Program Files\LLVM\bin\clang.exe"
+          $ver = (& $exe --version | Select-Object -First 1); Write-Host $ver
+          if ($ver -notmatch "22\.1\.8") { throw "expected 22.1.8 (latest 22.x), got '$ver'" }
+          $w = Join-Path $env:TEMP_DIR "ct"; New-Item -ItemType Directory $w -Force | Out-Null
+          '#include <iostream>
+          int main(){ std::cout << "hello-cpp-" << 42 << std::endl; }' | Set-Content "$w\h.cpp" -Encoding ascii
+          & "C:\Program Files\LLVM\bin\clang++.exe" "$w\h.cpp" -o "$w\h.exe"; if ($LASTEXITCODE) { throw "clang++ failed" }
+          $out = & "$w\h.exe"; Write-Host $out; if ($out -ne "hello-cpp-42") { throw "bad output" }
+          $s=[IO.File]::OpenRead("$w\h.exe"); $r=New-Object IO.BinaryReader($s); $s.Position=0x3C; $s.Position=$r.ReadInt32()+4; $m=$r.ReadUInt16(); $s.Dispose()
+          Write-Host ("PE machine: 0x{0:X4}" -f $m); if ($m -ne 0xAA64) { throw "not ARM64" }
+
+  pins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolset schema validation
+        shell: pwsh
+        run: ./helpers/CheckJsonSchema.ps1
+      - name: Pin checker (local mode, no issue creation)
+        shell: pwsh
+        run: |
+          $env:GITHUB_ACTIONS = 'false'
+          ./helpers/CheckOutdatedVersionPinning.ps1 | Out-Host
+          Get-ChildItem -Recurse -Filter "toolset-*.json" | Select-String '"review-at"' | ForEach-Object { "$($_.Filename): $($_.Line.Trim())" }
