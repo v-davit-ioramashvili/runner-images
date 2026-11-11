@@ -1,0 +1,194 @@
+name: Repro 15260 k3d Istio ambient netns hang
+
+on:
+  push:
+    branches:
+      - repro/15260-k3d-istio
+    paths:
+      - '.github/workflows/repro-k3d-istio-15260.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  EVIDENCE_BRANCH: evidence-15260
+
+jobs:
+  repro:
+    name: ${{ matrix.os }} rep ${{ matrix.rep }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-24.04]
+        rep: [1, 2, 3, 4]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      JOB_TAG: ${{ matrix.os }}-rep${{ matrix.rep }}-a${{ github.run_attempt }}
+    steps:
+      - name: Runner facts
+        run: |
+          echo "kernel=$(uname -r) image=$ImageOS/$ImageVersion"
+          docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+          containerd --version || true
+          sysctl kernel.hung_task_timeout_secs net.core.somaxconn || true
+
+      - name: Write evidence push helper
+        run: |
+          cat > /tmp/push.sh <<'EOF'
+          #!/bin/bash
+          # push.sh NAME FILE: commit FILE to the evidence branch, retrying on 409 races between jobs.
+          name=$1; file=$2
+          printf '{"message":"%s %s","branch":"%s","content":"%s"}' "$JOB_TAG" "$name" "$EVIDENCE_BRANCH" "$(base64 -w0 "$file")" > /tmp/push-$name.json
+          for i in 1 2 3 4 5 6 7 8; do
+            code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X PUT               -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/evidence/${GITHUB_RUN_ID}/${JOB_TAG}-${name}.txt"               --data @/tmp/push-$name.json)
+            echo "$(date -u +%T) push $name -> $code" >> /tmp/watchdog.log
+            [ "$code" = 201 ] && exit 0
+            sleep $((RANDOM % 10 + 3))
+          done
+          exit 1
+          EOF
+          chmod +x /tmp/push.sh
+
+      - name: Kernel changelog since 1017 (26.04 only)
+        if: matrix.os == 'ubuntu-26.04' && matrix.rep == 1
+        run: |
+          f=$(find /usr/share/doc -maxdepth 2 -name 'changelog.Debian.gz' -path "*$(uname -r)*" | head -1)
+          [ -z "$f" ] && f=$(find /usr/share/doc -maxdepth 2 -name 'changelog.Debian.gz' -path '*linux*azure*' | head -1)
+          echo "changelog file: $f"
+          zcat "$f" | awk '/^linux-azure.*\(7\.0\.0-1017/{exit} {print}' > /tmp/kernel-changelog.txt
+          wc -l /tmp/kernel-changelog.txt
+          grep -inE 'netns|net_namespace|cleanup_net|pernet|rtnl|rtnetlink|veth|vxlan|netfilter|nf_tables|nft_|wireguard|netvsc|mana|hv_|ip_set|conntrack|bpf|unregister_netdev' /tmp/kernel-changelog.txt | head -200 || true
+          /tmp/push.sh kernel-changelog /tmp/kernel-changelog.txt; tail -1 /tmp/watchdog.log
+
+      - name: Start watchdog
+        run: |
+          sudo sysctl -w kernel.sysrq=1 kernel.hung_task_timeout_secs=30 kernel.hung_task_warnings=-1
+          cat > /tmp/watchdog.sh <<'EOF'
+          #!/bin/bash
+          # Probes rtnl-backed calls every 10s; on a stall or hung-task report it dumps blocked
+          # tasks (sysrq w) and pushes dmesg to the evidence branch, since job logs can be lost.
+          log=/tmp/watchdog.log
+          pushes=0
+          hung_seen=0
+          while true; do
+            t0=$(date +%s.%N)
+            timeout 60 ip -4 route > /dev/null; rc=$?
+            dt=$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.2f", b-a}')
+            hung=$(sudo dmesg | grep -c 'blocked for more than')
+            echo "$(date -u +%T) ip_route=${dt}s rc=$rc hung_reports=$hung" >> $log
+            stalled=$(awk -v d="$dt" 'BEGIN{print (d>5)?1:0}')
+            if { [ "$stalled" = 1 ] || [ "$hung" -gt "$hung_seen" ]; } && [ $pushes -lt 4 ]; then
+              pushes=$((pushes + 1)); hung_seen=$hung
+              sudo sh -c 'echo w > /proc/sysrq-trigger'; sleep 3
+              { echo "kernel=$(uname -r) image=$ImageOS/$ImageVersion runner=$RUNNER_NAME"
+                echo "trigger: ip_route=${dt}s rc=$rc hung_reports=$hung"
+                echo "--- watchdog log"; tail -60 $log
+                echo "--- lsmod (net)"; lsmod | grep -E 'wireguard|vxlan|nf_tables|ip_set|veth|br_netfilter|geneve'
+                echo "--- netns count: $(sudo ip netns list 2>/dev/null | wc -l) / nsfs mounts: $(grep -c nsfs /proc/mounts)"
+                echo "--- dmesg"; sudo dmesg -T | tail -1500
+              } > /tmp/evidence.txt 2>&1
+              /tmp/push.sh "stall$pushes" /tmp/evidence.txt
+            fi
+            sleep 10
+          done
+          EOF
+          chmod +x /tmp/watchdog.sh
+          nohup setsid /tmp/watchdog.sh > /dev/null 2>&1 &
+          sleep 3; cat /tmp/watchdog.log || true
+
+      - name: Create k3d cluster and install Istio ambient
+        timeout-minutes: 15
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d cluster create repro --servers 1 --agents 1 \
+            --k3s-arg "--disable=traefik@server:*" --wait --timeout 300s
+          curl -fsSL https://istio.io/downloadIstio | sh -
+          export PATH="$PWD/$(ls -d istio-*/ | head -1)bin:$PATH"
+          istioctl version --remote=false
+          istioctl install -y --set profile=ambient --set values.global.platform=k3d
+          kubectl -n istio-system rollout status ds/ztunnel --timeout=300s
+          kubectl -n istio-system rollout status ds/istio-cni-node --timeout=300s
+          kubectl get pods -A -o wide
+          lsmod | grep -E 'wireguard|vxlan|nf_tables|ip_set|veth|br_netfilter' || true
+          echo "ISTIO_BIN=$PWD/$(ls -d istio-*/ | head -1)bin" >> $GITHUB_ENV
+
+      - name: Churn ambient namespaces (netns create/teardown)
+        timeout-minutes: 30
+        run: |
+          cat > /tmp/ns.yaml <<'EOF'
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: NS
+            labels:
+              istio.io/dataplane-mode: ambient
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: {name: server, namespace: NS}
+          spec:
+            replicas: 3
+            selector: {matchLabels: {app: server}}
+            template:
+              metadata: {labels: {app: server}}
+              spec:
+                containers:
+                - name: s
+                  image: registry.k8s.io/e2e-test-images/agnhost:2.53
+                  args: ["netexec", "--http-port=8080"]
+                  readinessProbe: {httpGet: {path: /healthz, port: 8080}, periodSeconds: 2}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: server, namespace: NS}
+          spec:
+            selector: {app: server}
+            ports: [{port: 8080}]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: {name: client, namespace: NS}
+          spec:
+            replicas: 2
+            selector: {matchLabels: {app: client}}
+            template:
+              metadata: {labels: {app: client}}
+              spec:
+                containers:
+                - name: c
+                  image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+                  command: ["sh", "-c", "while true; do wget -qO- -T 3 http://server:8080/hostname >/dev/null 2>&1; sleep 0.5; done"]
+          EOF
+          for round in $(seq 1 12); do
+            start=$(date +%s)
+            for i in $(seq 1 8); do sed "s/NS/r${round}-n${i}/g" /tmp/ns.yaml | kubectl apply -f - > /dev/null; done
+            for i in $(seq 1 8); do
+              kubectl -n r${round}-n${i} rollout status deploy/server --timeout=180s > /dev/null || echo "round $round ns $i server not ready"
+            done
+            # Overlap teardown of this round with the next round's setup, like an upgrade.
+            for i in $(seq 1 8); do kubectl delete ns r${round}-n${i} --wait=false > /dev/null; done
+            if [ $((round % 4)) = 0 ]; then
+              kubectl -n istio-system rollout restart ds/ztunnel ds/istio-cni-node
+              kubectl -n istio-system rollout status ds/ztunnel --timeout=180s || echo "ztunnel restart slow"
+            fi
+            echo "round $round done in $(( $(date +%s) - start ))s; $(tail -1 /tmp/watchdog.log)"
+          done
+          kubectl get ns | grep -c Terminating || true
+          echo "Recreate the cluster to tear down every netns at once"
+          k3d cluster delete repro
+          tail -3 /tmp/watchdog.log
+
+      - name: Watchdog summary
+        if: always()
+        timeout-minutes: 5
+        run: |
+          echo "kernel=$(uname -r) image=$ImageOS/$ImageVersion"
+          awk -F'ip_route=' '{split($2,a,"s"); if (a[1]+0 > max) max=a[1]+0} END {print "max ip route latency:", max "s"}' /tmp/watchdog.log
+          grep -c . /tmp/watchdog.log
+          grep -E 'push|rc=[^0]' /tmp/watchdog.log || true
+          timeout 20 sudo dmesg -T | grep -E -A30 'blocked for more than' | head -200 || echo "no hung-task reports"
+          cp /tmp/watchdog.log /tmp/summary.txt
+          /tmp/push.sh summary /tmp/summary.txt; tail -1 /tmp/watchdog.log
