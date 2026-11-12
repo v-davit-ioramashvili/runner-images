@@ -21,7 +21,7 @@ jobs:
           import PackageDescription
           let package = Package(name: "Lib", platforms: [.macOS(.v14)], products: [.library(name: "Lib", type: .dynamic, targets: ["Lib"])], targets: [.target(name: "Lib")])
           EOF
-          for i in $(seq 1 40); do echo "public struct S$i { public let next: S$(( (i % 40) + 1 ))? = nil; public init() {} }" > Sources/Lib/File$i.swift; done
+          for i in $(seq 1 40); do echo "public final class C$i { public var next: C$(( (i % 40) + 1 ))? = nil; public init() {} }" > Sources/Lib/File$i.swift; done
 
       - name: Build variants and inspect swiftc args and .d files
         run: |
@@ -40,7 +40,7 @@ jobs:
             done | sort | head -5
             echo "  .d files: $(find "$dd" -path '*Objects-normal*' -name '*.d' | grep -v emit-module | wc -l)"
           }
+          xcodebuild -scheme Lib -destination 'generic/platform=macOS' -configuration Release -showBuildSettings 2>/dev/null | grep -E ' (SWIFT_COMPILATION_MODE|SWIFT_OPTIMIZATION_LEVEL|SWIFT_WHOLE_MODULE_OPTIMIZATION) '
           variant wmo_default SWIFT_COMPILATION_MODE=wholemodule
-          variant wmo_parallel_off SWIFT_COMPILATION_MODE=wholemodule SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO
-          variant wmo_batch_off SWIFT_COMPILATION_MODE=wholemodule SWIFT_ENABLE_BATCH_MODE=NO
-          variant singlefile SWIFT_COMPILATION_MODE=singlefile
+          variant singlefile_only SWIFT_COMPILATION_MODE=singlefile
+          variant singlefile_O SWIFT_COMPILATION_MODE=singlefile SWIFT_OPTIMIZATION_LEVEL=-O SWIFT_WHOLE_MODULE_OPTIMIZATION=NO
