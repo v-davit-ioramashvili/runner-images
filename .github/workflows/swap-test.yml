@@ -11,6 +11,8 @@ jobs:
     steps:
       - name: Create package with 40 files
         run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_27.2*.app 2>/dev/null | head -1); [ -n "$X" ] && sudo xcode-select -s "$X"
           xcodebuild -version
           xcodebuild -help 2>&1 | grep -A1 -E '^\s*-jobs' || true
           mkdir -p Pkg/Sources/Lib && cd Pkg
@@ -24,11 +26,14 @@ jobs:
       - name: Build variants and inspect swiftc args and .d files
         run: |
           cd Pkg
+          set +e
           variant() {
             name=$1; shift
             dd="$RUNNER_TEMP/dd-$name"
             xcodebuild -scheme Lib -destination 'generic/platform=macOS' -derivedDataPath "$dd" -configuration Release "$@" build > "$RUNNER_TEMP/$name.log" 2>&1
-            echo "=== $name (exit $?) settings: $*"
+            rc=$?
+            echo "=== $name (exit $rc) settings: $*"
+            [ $rc -ne 0 ] && grep -E "error|warning: " "$RUNNER_TEMP/$name.log" | head -15
             grep -oE '(-num-threads [0-9]+|-j[0-9]+|-whole-module-optimization|-enable-batch-mode|-disable-batch-mode)' "$RUNNER_TEMP/$name.log" | sort | uniq -c
             for d in $(find "$dd" -path '*Objects-normal*' -name '*.d' -size +0 | grep -v emit-module); do
               echo "  $(basename $d): lines=$(wc -l < $d) bytes=$(wc -c < $d)"
