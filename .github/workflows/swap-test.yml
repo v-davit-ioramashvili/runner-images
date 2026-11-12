@@ -6,23 +6,15 @@ on:
 
 jobs:
   swap:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [xcode-27, macos-26]
-    runs-on: ${{ matrix.runner }}
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - name: Baseline
         run: |
-          sw_vers
-          sysctl hw.model hw.memsize hw.ncpu
-          sysctl vm.swapusage vm.swap_enabled 2>/dev/null || true
-          sysctl -a | grep -iE '^vm\.(compressor|swap)' || true
-          df -h / /System/Volumes/Data /System/Volumes/VM
-          ls -la /System/Volumes/VM || true
-          sudo launchctl print system/com.apple.dynamic_pager 2>&1 | head -30 || true
-          cat /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist 2>/dev/null || true
+          sysctl hw.model hw.memsize hw.ncpu vm.swapusage vm.swap_enabled vm.compressor.config.swap_active
+          sysctl vm.compressor.swapper.swapfile_cnt vm.compressor.swapper.reclaim_threshold_bytes vm.compressor_pool_size vm.swapfileprefix
+          df -h /System/Volumes/Data /System/Volumes/VM
+          memory_pressure -Q || true
           vm_stat
 
       - name: Build stress tool
@@ -32,19 +24,30 @@ jobs:
           #include <stdlib.h>
           #include <stdint.h>
           #include <unistd.h>
+          #define CHUNK_MB 256
+          #define MAXCHUNKS 4096
+          uint64_t *volatile chunks[MAXCHUNKS];
           int main(int argc, char **argv) {
-            size_t target_mb = strtoull(argv[1], 0, 10), chunk_mb = 256, done = 0;
+            size_t target_mb = strtoull(argv[1], 0, 10), n = 0;
+            size_t words = ((size_t)CHUNK_MB << 20) / 8;
             uint64_t s = 0x9E3779B97F4A7C15ULL;
-            while (done < target_mb) {
-              uint64_t *p = malloc(chunk_mb << 20);
-              if (!p) { printf("malloc failed at %zu MB\n", done); fflush(stdout); break; }
-              for (size_t i = 0; i < (chunk_mb << 20) / 8; i++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; p[i] = s; }
-              done += chunk_mb;
-              printf("allocated %zu MB\n", done); fflush(stdout);
-              usleep(500000);
+            while (n * CHUNK_MB < target_mb && n < MAXCHUNKS) {
+              volatile uint64_t *p = malloc((size_t)CHUNK_MB << 20);
+              if (!p) { printf("malloc failed at %zu MB\n", n * CHUNK_MB); fflush(stdout); break; }
+              for (size_t i = 0; i < words; i++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; p[i] = s; }
+              chunks[n++] = (uint64_t *)p;
+              printf("allocated %zu MB\n", n * CHUNK_MB); fflush(stdout);
+              usleep(300000);
             }
-            printf("holding %zu MB for 60s\n", done); fflush(stdout);
-            sleep(60);
+            for (int round = 0; round < 3; round++) {
+              uint64_t sum = 0;
+              for (size_t c = 0; c < n; c++) {
+                volatile uint64_t *p = chunks[c];
+                for (size_t i = 0; i < words; i += 2048) sum += p[i];
+              }
+              printf("round %d: touched %zu MB, checksum %llx\n", round, n * CHUNK_MB, (unsigned long long)sum); fflush(stdout);
+              sleep(15);
+            }
             return 0;
           }
           EOF
@@ -55,23 +58,22 @@ jobs:
           MEM_MB=$(( $(sysctl -n hw.memsize) / 1048576 ))
           TARGET=$(( MEM_MB * 3 / 2 ))
           echo "RAM ${MEM_MB} MB, allocating ${TARGET} MB of random data"
-          (
-            while true; do
-              ts=$(date +%H:%M:%S)
-              su=$(sysctl -n vm.swapusage)
-              vs=$(vm_stat | awk -F: '/Pages free|occupied by compressor|Swapouts|Swapins|stored in compressor|File-backed/ {gsub(/ /,"",$1); gsub(/[ .]/,"",$2); printf "%s=%s ", $1, $2}')
-              av=$(df -m /System/Volumes/Data | awk 'NR==2{print $4}')
-              echo "SAMPLE $ts | $su | $vs| data_free_mb=$av"
-              sleep 2
-            done
-          ) &
-          SAMPLER=$!
           set +e
-          ./stress "$TARGET"
+          ./stress "$TARGET" &
+          PID=$!
+          while kill -0 $PID 2>/dev/null; do
+            ts=$(date +%H:%M:%S)
+            rss=$(ps -o rss= -p $PID 2>/dev/null | awk '{printf "%d", $1/1024}')
+            su=$(sysctl -n vm.swapusage | awk '{print $3"/"$6}')
+            sw=$(sysctl -n vm.compressor.swapper.swapouts_total vm.compressor.swapper.swapfile_cnt | tr '\n' '/')
+            vs=$(vm_stat | awk -F: '/Pages free|occupied by compressor|stored in compressor|File-backed|Anonymous|Swapouts/ {gsub(/ /,"",$1); gsub(/[ .]/,"",$2); printf "%s=%s ", $1, $2}')
+            lvl=$(sysctl -n kern.memorystatus_level)
+            echo "SAMPLE $ts rss_mb=$rss swap_total/used=$su swapouts/files=$sw mem_level=$lvl | $vs"
+            sleep 3
+          done
+          wait $PID
           echo "stress exit code: $?"
-          sleep 6
-          kill $SAMPLER
           ls -la /System/Volumes/VM
-          sysctl vm.swapusage
+          sysctl vm.swapusage vm.compressor.swapper.swapouts_total vm.compressor.swapper.swapfile_cnt vm.compressor.swapper.used_bytes_hwm
           vm_stat
-          log show --last 10m --predicate 'eventMessage CONTAINS[c] "jetsam" OR eventMessage CONTAINS[c] "swap" OR process == "dynamic_pager"' --style compact 2>/dev/null | tail -40
+          log show --last 10m --predicate '(eventMessage CONTAINS[c] "jetsam" AND NOT eventMessage CONTAINS "not memory-managed") OR eventMessage CONTAINS[c] "swapfile" OR process == "dynamic_pager" OR eventMessage CONTAINS[c] "memorystatus_kill"' --style compact 2>/dev/null | grep -v "duetactivityscheduler" | tail -40
