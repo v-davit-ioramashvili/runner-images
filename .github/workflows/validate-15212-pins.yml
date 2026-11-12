@@ -1,6 +1,6 @@
 # TEMPORARY - validation aid for the #15212 version pinning review. Not for upstream.
-#   vcpkg-arm64   : reproduce why the vcpkg pin exists, then run the real install-vcpkg.sh
-#                   from this branch (no pin, no VCPKG_FORCE_SYSTEM_BINARIES) and build a
+#   vcpkg-arm64   : run the real install-vcpkg.sh from this branch (toolset without the vcpkg
+#                   pin, VCPKG_FORCE_SYSTEM_BINARIES kept as on the image) and build a
 #                   manifest project against the image's CMake 3.31.6.
 #   cmake4-compat : show which cmake_minimum_required values CMake 4.4.5 still rejects.
 #   llvm-arm64    : run the real Install-LLVM.ps1 with llvm.version "22.*".
@@ -37,25 +37,6 @@ jobs:
           echo "image vcpkg commit: $(git -C "$VCPKG_INSTALLATION_ROOT" log -1 --format='%h %cs')"
           grep -n VCPKG /etc/environment || true
 
-      - name: Repro - vcpkg master + FORCE_SYSTEM_BINARIES + CMake 3.31.6 (expected to fail)
-        id: repro
-        continue-on-error: true
-        run: |
-          git clone -q --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg-master"
-          "$RUNNER_TEMP/vcpkg-master/bootstrap-vcpkg.sh" -disableMetrics
-          set +e
-          VCPKG_FORCE_SYSTEM_BINARIES=1 "$RUNNER_TEMP/vcpkg-master/vcpkg" install sqlite3 zlib > "$RUNNER_TEMP/repro.log" 2>&1
-          rc=$?
-          tail -40 "$RUNNER_TEMP/repro.log"
-          exit $rc
-
-      - name: Repro evidence
-        if: always()
-        run: |
-          echo "repro outcome: ${{ steps.repro.outcome }}"
-          grep -rn "STRING_ENCODE" "$RUNNER_TEMP/repro.log" "$RUNNER_TEMP"/vcpkg-master/buildtrees/*/*.log 2>/dev/null | head -5 || true
-          rm -rf "$RUNNER_TEMP/vcpkg-master"
-
       - name: Run the real install-vcpkg.sh from this branch on a clean vcpkg location
         run: |
           set -e
@@ -64,7 +45,10 @@ jobs:
           sudo cp -r images/ubuntu/scripts/tests/. /imagegeneration/tests/
           sudo cp "images/ubuntu/toolsets/${{ matrix.toolset }}" /imagegeneration/installers/toolset.json
           echo "toolset .vcpkg = $(jq -c '.vcpkg' /imagegeneration/installers/toolset.json)"
-          # mirror a fresh build: no vcpkg yet and no env var from an earlier build
+          # configure-environment.sh provides invoke_tests as a symlink in a real build
+          sudo chmod +x /imagegeneration/helpers/invoke-tests.sh
+          sudo ln -sf /imagegeneration/helpers/invoke-tests.sh /usr/local/bin/invoke_tests
+          # mirror a fresh build: no vcpkg yet, no VCPKG_FORCE_SYSTEM_BINARIES line yet (the script writes it)
           sudo rm -rf /usr/local/share/vcpkg /usr/local/bin/vcpkg
           sudo sed -i '/^VCPKG_FORCE_SYSTEM_BINARIES=/d' /etc/environment
           sudo env -u VCPKG_FORCE_SYSTEM_BINARIES \
@@ -75,14 +59,17 @@ jobs:
       - name: Check the result of the install
         run: |
           set -e
-          if grep -q '^VCPKG_FORCE_SYSTEM_BINARIES=' /etc/environment; then echo "env var still written"; exit 1; fi
-          echo "installed vcpkg commit: $(git -C /usr/local/share/vcpkg log -1 --format='%h %cs') (master: $(git ls-remote https://github.com/microsoft/vcpkg refs/heads/master | cut -c1-10))"
+          grep -n '^VCPKG' /etc/environment
+          installed=$(git -C /usr/local/share/vcpkg rev-parse HEAD)
+          master=$(git ls-remote https://github.com/microsoft/vcpkg refs/heads/master | cut -f1)
+          echo "installed vcpkg commit: ${installed:0:10} $(git -C /usr/local/share/vcpkg log -1 --format=%cs), master: ${master:0:10}"
+          git -C /usr/local/share/vcpkg merge-base --is-ancestor b558d01407 HEAD && echo "contains microsoft/vcpkg#53440 (b558d01407)"
           vcpkg version | head -1
 
       - name: Build a manifest project (sqlite3 + zlib) with the image's CMake 3.31.6
         run: |
           set -e
-          unset VCPKG_FORCE_SYSTEM_BINARIES
+          echo "VCPKG_FORCE_SYSTEM_BINARIES='${VCPKG_FORCE_SYSTEM_BINARIES:-}' (image default)"
           export VCPKG_INSTALLATION_ROOT=/usr/local/share/vcpkg
           mkdir -p "$RUNNER_TEMP/probe" && cd "$RUNNER_TEMP/probe"
           cat > vcpkg.json <<'EOF'
@@ -106,7 +93,6 @@ jobs:
           cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build
           ./build/probe
-          echo "tools vcpkg downloaded:"; ls "$VCPKG_INSTALLATION_ROOT/downloads/tools" || true
           file build/probe
 
   cmake4-compat:
