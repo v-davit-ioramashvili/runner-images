@@ -1,0 +1,108 @@
+name: Repro 15310 tshark AppArmor plugins
+
+on:
+  push:
+    branches: [repro/15310-tshark-apparmor]
+  workflow_dispatch:
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Image state before installing anything
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          lsb_release -ds; uname -r
+          echo "--- tshark preinstalled?"; command -v tshark || echo "no tshark"; dpkg -l tshark wireshark-common 2>/dev/null | grep -E '^ii' || echo "not installed"
+          echo "--- tshark profile file"; ls -l /etc/apparmor.d/tshark /etc/apparmor.d/usr.bin.tshark 2>&1 || true
+          dpkg -S /etc/apparmor.d/tshark 2>&1 || true
+          dpkg -l apparmor | grep -E '^ii'
+          echo "--- loaded profiles"; sudo aa-status 2>/dev/null | grep -i -E 'tshark|wireshark|dumpcap|tcpdump' || echo "none loaded"
+
+      - name: Install tshark
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark >/dev/null
+          tshark --version | head -1
+          echo "--- profile content"; cat /etc/apparmor.d/tshark 2>/dev/null || echo "no /etc/apparmor.d/tshark"
+          echo "--- local override file"; ls -l /etc/apparmor.d/local/tshark 2>&1 || true
+          echo "--- loaded profiles"; sudo aa-status 2>/dev/null | grep -i -E 'tshark|dumpcap' || echo "none loaded"
+          tshark -G folders
+
+      - name: Prepare plugins
+        run: |
+          set -x
+          WS_VER=$(tshark --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          ARCHDIR=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          echo "WS_VER=$WS_VER" >> "$GITHUB_ENV"
+          SYS_EPAN="/usr/lib/$ARCHDIR/wireshark/plugins/$WS_VER/epan"
+          ls "$SYS_EPAN"
+          # Lua plugin: one copy in each user location, each registers its own protocol
+          mkdir -p "$GITHUB_WORKSPACE/custom_plugins/$WS_VER/epan" "$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
+          echo 'Proto("luaenv15310", "Lua via WIRESHARK_PLUGIN_DIR")' > "$GITHUB_WORKSPACE/custom_plugins/luaenv15310.lua"
+          echo 'Proto("luahome15310", "Lua via personal plugin dir")' > "$HOME/.local/lib/wireshark/plugins/luahome15310.lua"
+          # Binary plugin: move the shipped gryphon.so out of the system dir into both user locations
+          sudo cp "$SYS_EPAN/gryphon.so" "$GITHUB_WORKSPACE/custom_plugins/$WS_VER/epan/"
+          sudo cp "$SYS_EPAN/gryphon.so" "$HOME/.local/lib/wireshark/plugins/$WS_VER/epan/"
+          sudo chown -R runner: "$GITHUB_WORKSPACE/custom_plugins" "$HOME/.local/lib/wireshark"
+          sudo mv "$SYS_EPAN/gryphon.so" /tmp/gryphon.so.system
+          # Capture file in $HOME and in the workspace (side note in the LP bug)
+          python3 - <<'EOF'
+          import struct, os
+          hdr = struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+          pkt = bytes(14 + 20)
+          rec = struct.pack('<IIII', 0, 0, len(pkt), len(pkt)) + pkt
+          for p in (os.path.expanduser('~/home15310.pcap'), os.path.join(os.environ['GITHUB_WORKSPACE'], 'ws15310.pcap')):
+              open(p, 'wb').write(hdr + rec)
+          EOF
+          cat > "$RUNNER_TEMP/check.sh" <<'EOF'
+          #!/bin/bash
+          label="$1"
+          echo "================ $label ================"
+          sudo dmesg -C
+          echo "--- WIRESHARK_PLUGIN_DIR=$GITHUB_WORKSPACE/custom_plugins"
+          P1=$(WIRESHARK_PLUGIN_DIR="$GITHUB_WORKSPACE/custom_plugins" tshark -G plugins 2>&1)
+          echo "$P1" | grep -i -E 'gryphon|15310|custom_plugins' || echo "(no custom plugins listed)"
+          WIRESHARK_PLUGIN_DIR="$GITHUB_WORKSPACE/custom_plugins" tshark -G protocols 2>&1 | grep -E 'luaenv15310|gryphon' || echo "(protocols luaenv15310/gryphon not registered)"
+          echo "--- personal dir $HOME/.local/lib/wireshark/plugins"
+          P2=$(tshark -G plugins 2>&1)
+          echo "$P2" | grep -i -E 'gryphon|15310|\.local' || echo "(no personal plugins listed)"
+          tshark -G protocols 2>&1 | grep -E 'luahome15310|gryphon' || echo "(protocols luahome15310/gryphon not registered)"
+          echo "--- capture files"
+          tshark -r "$HOME/home15310.pcap" -c 1 2>&1 | head -2
+          tshark -r "$GITHUB_WORKSPACE/ws15310.pcap" -c 1 2>&1 | head -2
+          echo "--- AppArmor DENIED lines"
+          sudo dmesg | grep -E 'apparmor="DENIED"' | grep -E 'tshark' | sed -E 's/^\[[^]]*\] //' | sort -u || echo "(none)"
+          EOF
+          chmod +x "$RUNNER_TEMP/check.sh"
+
+      - name: "Case A: as shipped (enforce)"
+        run: $RUNNER_TEMP/check.sh "as shipped"
+
+      - name: "Case B: local override in /etc/apparmor.d/local/tshark"
+        if: startsWith(matrix.os, 'ubuntu-26.04')
+        run: |
+          grep -n 'local/tshark' /etc/apparmor.d/tshark
+          sudo tee -a /etc/apparmor.d/local/tshark <<'EOF'
+          owner @{HOME}/.local/lib/wireshark/** mr,
+          owner /home/runner/work/** mr,
+          EOF
+          sudo apparmor_parser -r -W /etc/apparmor.d/tshark
+          $RUNNER_TEMP/check.sh "local override"
+          sudo truncate -s 0 /etc/apparmor.d/local/tshark
+          sudo apparmor_parser -r -W /etc/apparmor.d/tshark
+
+      - name: "Case C: aa-complain"
+        if: startsWith(matrix.os, 'ubuntu-26.04')
+        run: |
+          sudo apt-get install -y -qq apparmor-utils >/dev/null
+          sudo aa-complain /etc/apparmor.d/tshark
+          sudo aa-status | grep -A0 -i tshark || true
+          $RUNNER_TEMP/check.sh "complain"
+          echo "--- ALLOWED lines in complain mode (what the profile would need)"
+          sudo dmesg | grep -E 'apparmor="ALLOWED"' | grep tshark | sed -E 's/^\[[^]]*\] //' | sort -u || true
