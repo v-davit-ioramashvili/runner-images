@@ -1,0 +1,58 @@
+name: Recheck podman/pasta AppArmor teardown - issue 15182
+
+on:
+  push:
+    branches:
+      - validate/15182-recheck
+
+permissions: {}
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Environment
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"
+          dpkg-query -W podman passt apparmor
+          md5sum /etc/apparmor.d/usr.bin.pasta
+          grep -n 'signal' /etc/apparmor.d/usr.bin.pasta /etc/apparmor.d/abstractions/pasta /etc/apparmor.d/abstractions/passt || echo 'no signal rules'
+          sudo apt-get update -q >/dev/null
+          apt-cache policy passt apparmor | grep -E '^[a-z]|Installed|Candidate'
+
+      - name: A - rootless netns teardown
+        id: a
+        continue-on-error: true
+        run: podman unshare --rootless-netns true
+
+      - name: B - container on a bridge network
+        id: b
+        if: always()
+        continue-on-error: true
+        run: |
+          podman network create repro-net
+          podman run --rm --network repro-net docker.io/library/alpine:3.20 true 2>&1 | tee b.log
+          podman network rm repro-net
+          ! grep -q 'kill network process' b.log
+
+      - name: C - compose over the Docker-compatible API
+        id: c
+        if: always()
+        continue-on-error: true
+        run: |
+          systemctl --user start podman.socket
+          export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+          mkdir -p /tmp/repro && cd /tmp/repro
+          printf 'services:\n  redis:\n    image: docker.io/library/redis:7-alpine\n' > docker-compose.yml
+          docker compose up -d
+          docker compose down -v
+
+      - name: Denials and summary
+        if: always()
+        run: |
+          sudo dmesg | grep 'apparmor="DENIED"' | grep pasta || echo 'no pasta denials'
+          echo "${{ matrix.os }} $ImageVersion: A=${{ steps.a.outcome }} B=${{ steps.b.outcome }} C=${{ steps.c.outcome }}"
