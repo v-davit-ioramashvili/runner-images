@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Image state before installing anything
@@ -84,25 +84,16 @@ jobs:
       - name: "Case A: as shipped (enforce)"
         run: $RUNNER_TEMP/check.sh "as shipped"
 
-      - name: "Case B: local override in /etc/apparmor.d/local/tshark"
-        if: startsWith(matrix.os, 'ubuntu-26.04')
+      - name: "Case D: single home rule via local override"
         run: |
-          grep -n 'local/tshark' /etc/apparmor.d/tshark
-          sudo tee -a /etc/apparmor.d/local/tshark <<'EOF'
-          owner @{HOME}/.local/lib/wireshark/** mr,
-          owner /home/runner/work/** mr,
-          EOF
+          echo 'owner @{HOME}/** mr,' | sudo tee /etc/apparmor.d/local/tshark
           sudo apparmor_parser -r -W /etc/apparmor.d/tshark
-          $RUNNER_TEMP/check.sh "local override"
-          sudo truncate -s 0 /etc/apparmor.d/local/tshark
+          $RUNNER_TEMP/check.sh "owner @{HOME}/** mr"
+          sudo rm /etc/apparmor.d/local/tshark
           sudo apparmor_parser -r -W /etc/apparmor.d/tshark
 
-      - name: "Case C: aa-complain"
-        if: startsWith(matrix.os, 'ubuntu-26.04')
+      - name: "Case E: unload the profile (no extra packages)"
         run: |
-          sudo apt-get install -y -qq apparmor-utils >/dev/null
-          sudo aa-complain /etc/apparmor.d/tshark
-          sudo aa-status | grep -A0 -i tshark || true
-          $RUNNER_TEMP/check.sh "complain"
-          echo "--- ALLOWED lines in complain mode (what the profile would need)"
-          sudo dmesg | grep -E 'apparmor="ALLOWED"' | grep tshark | sed -E 's/^\[[^]]*\] //' | sort -u || true
+          sudo apparmor_parser -R /etc/apparmor.d/tshark
+          sudo aa-status | grep -i tshark || echo "tshark profile not loaded"
+          $RUNNER_TEMP/check.sh "profile unloaded"
