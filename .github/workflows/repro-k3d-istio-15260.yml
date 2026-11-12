@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, ubuntu-24.04]
-        rep: [1, 2, 3, 4]
+        rep: [1]
     env:
       GH_TOKEN: ${{ github.token }}
       JOB_TAG: ${{ matrix.os }}-rep${{ matrix.rep }}-a${{ github.run_attempt }}
@@ -108,7 +108,15 @@ jobs:
           curl -fsSL https://istio.io/downloadIstio | sh -
           export PATH="$PWD/$(ls -d istio-*/ | head -1)bin:$PATH"
           istioctl version --remote=false
-          istioctl install -y --set profile=ambient --set values.global.platform=k3d
+          istioctl version --remote=false
+          diag() {
+            kubectl get pods -A -o wide
+            kubectl -n istio-system describe pod -l app=ztunnel | tail -60
+            kubectl -n istio-system logs -l app=ztunnel --tail=80 --all-containers || true
+            kubectl -n istio-system logs -l k8s-app=istio-cni-node --tail=40 || true
+            kubectl get events -A --sort-by=.lastTimestamp | tail -40
+          }
+          istioctl install -y --set profile=ambient --set values.global.platform=k3d --readiness-timeout 4m || { diag; exit 1; }
           kubectl -n istio-system rollout status ds/ztunnel --timeout=300s
           kubectl -n istio-system rollout status ds/istio-cni-node --timeout=300s
           kubectl get pods -A -o wide
