@@ -1,79 +1,41 @@
-name: swap-test-15313
+name: xcode-settings-15313
 on:
   push:
     branches: [swap-test-15313]
   workflow_dispatch:
 
 jobs:
-  swap:
+  settings:
     runs-on: xcode-27
     timeout-minutes: 30
     steps:
-      - name: Baseline
+      - name: Create package with 40 files
         run: |
-          sysctl hw.model hw.memsize hw.ncpu vm.swapusage vm.swap_enabled vm.compressor.config.swap_active
-          sysctl vm.compressor.swapper.swapfile_cnt vm.compressor.swapper.reclaim_threshold_bytes vm.compressor_pool_size vm.swapfileprefix
-          df -h /System/Volumes/Data /System/Volumes/VM
-          memory_pressure -Q || true
-          vm_stat
-
-      - name: Build stress tool
-        run: |
-          cat > stress.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <stdint.h>
-          #include <unistd.h>
-          #define CHUNK_MB 256
-          #define MAXCHUNKS 4096
-          uint64_t *volatile chunks[MAXCHUNKS];
-          int main(int argc, char **argv) {
-            size_t target_mb = strtoull(argv[1], 0, 10), n = 0;
-            size_t words = ((size_t)CHUNK_MB << 20) / 8;
-            uint64_t s = 0x9E3779B97F4A7C15ULL;
-            while (n * CHUNK_MB < target_mb && n < MAXCHUNKS) {
-              volatile uint64_t *p = malloc((size_t)CHUNK_MB << 20);
-              if (!p) { printf("malloc failed at %zu MB\n", n * CHUNK_MB); fflush(stdout); break; }
-              for (size_t i = 0; i < words; i++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; p[i] = s; }
-              chunks[n++] = (uint64_t *)p;
-              printf("allocated %zu MB\n", n * CHUNK_MB); fflush(stdout);
-              usleep(300000);
-            }
-            for (int round = 0; round < 3; round++) {
-              uint64_t sum = 0;
-              for (size_t c = 0; c < n; c++) {
-                volatile uint64_t *p = chunks[c];
-                for (size_t i = 0; i < words; i += 2048) sum += p[i];
-              }
-              printf("round %d: touched %zu MB, checksum %llx\n", round, n * CHUNK_MB, (unsigned long long)sum); fflush(stdout);
-              sleep(15);
-            }
-            return 0;
-          }
+          xcodebuild -version
+          xcodebuild -help 2>&1 | grep -A1 -E '^\s*-jobs' || true
+          mkdir -p Pkg/Sources/Lib && cd Pkg
+          cat > Package.swift <<'EOF'
+          // swift-tools-version:5.9
+          import PackageDescription
+          let package = Package(name: "Lib", platforms: [.macOS(.v14)], products: [.library(name: "Lib", type: .dynamic, targets: ["Lib"])], targets: [.target(name: "Lib")])
           EOF
-          clang -O2 -o stress stress.c
+          for i in $(seq 1 40); do echo "public struct S$i { public let next: S$(( (i % 40) + 1 ))? = nil; public init() {} }" > Sources/Lib/File$i.swift; done
 
-      - name: Stress with incompressible memory and sample
+      - name: Build variants and inspect swiftc args and .d files
         run: |
-          MEM_MB=$(( $(sysctl -n hw.memsize) / 1048576 ))
-          TARGET=$(( MEM_MB * 3 / 2 ))
-          echo "RAM ${MEM_MB} MB, allocating ${TARGET} MB of random data"
-          set +e
-          ./stress "$TARGET" &
-          PID=$!
-          while kill -0 $PID 2>/dev/null; do
-            ts=$(date +%H:%M:%S)
-            rss=$(ps -o rss= -p $PID 2>/dev/null | awk '{printf "%d", $1/1024}')
-            su=$(sysctl -n vm.swapusage | awk '{print $3"/"$6}')
-            sw=$(sysctl -n vm.compressor.swapper.swapouts_total vm.compressor.swapper.swapfile_cnt | tr '\n' '/')
-            vs=$(vm_stat | awk -F: '/Pages free|occupied by compressor|stored in compressor|File-backed|Anonymous|Swapouts/ {gsub(/ /,"",$1); gsub(/[ .]/,"",$2); printf "%s=%s ", $1, $2}')
-            lvl=$(sysctl -n kern.memorystatus_level)
-            echo "SAMPLE $ts rss_mb=$rss swap_total/used=$su swapouts/files=$sw mem_level=$lvl | $vs"
-            sleep 3
-          done
-          wait $PID
-          echo "stress exit code: $?"
-          ls -la /System/Volumes/VM
-          sysctl vm.swapusage vm.compressor.swapper.swapouts_total vm.compressor.swapper.swapfile_cnt vm.compressor.swapper.used_bytes_hwm
-          vm_stat
-          log show --last 10m --predicate '(eventMessage CONTAINS[c] "jetsam" AND NOT eventMessage CONTAINS "not memory-managed") OR eventMessage CONTAINS[c] "swapfile" OR process == "dynamic_pager" OR eventMessage CONTAINS[c] "memorystatus_kill"' --style compact 2>/dev/null | grep -v "duetactivityscheduler" | tail -40
+          cd Pkg
+          variant() {
+            name=$1; shift
+            dd="$RUNNER_TEMP/dd-$name"
+            xcodebuild -scheme Lib -destination 'generic/platform=macOS' -derivedDataPath "$dd" -configuration Release "$@" build > "$RUNNER_TEMP/$name.log" 2>&1
+            echo "=== $name (exit $?) settings: $*"
+            grep -oE '(-num-threads [0-9]+|-j[0-9]+|-whole-module-optimization|-enable-batch-mode|-disable-batch-mode)' "$RUNNER_TEMP/$name.log" | sort | uniq -c
+            for d in $(find "$dd" -path '*Objects-normal*' -name '*.d' -size +0 | grep -v emit-module); do
+              echo "  $(basename $d): lines=$(wc -l < $d) bytes=$(wc -c < $d)"
+            done | sort | head -5
+            echo "  .d files: $(find "$dd" -path '*Objects-normal*' -name '*.d' | grep -v emit-module | wc -l)"
+          }
+          variant wmo_default SWIFT_COMPILATION_MODE=wholemodule
+          variant wmo_parallel_off SWIFT_COMPILATION_MODE=wholemodule SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO
+          variant wmo_batch_off SWIFT_COMPILATION_MODE=wholemodule SWIFT_ENABLE_BATCH_MODE=NO
+          variant singlefile SWIFT_COMPILATION_MODE=singlefile
