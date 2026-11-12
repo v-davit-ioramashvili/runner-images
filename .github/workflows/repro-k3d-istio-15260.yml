@@ -103,7 +103,7 @@ jobs:
         timeout-minutes: 15
         run: |
           curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-          k3d cluster create repro --servers 1 --agents 1 \
+          k3d cluster create repro --servers 1 --agents 0 \
             --k3s-arg "--disable=traefik@server:*" --wait --timeout 300s
           curl -fsSL https://istio.io/downloadIstio | sh -
           export PATH="$PWD/$(ls -d istio-*/ | head -1)bin:$PATH"
