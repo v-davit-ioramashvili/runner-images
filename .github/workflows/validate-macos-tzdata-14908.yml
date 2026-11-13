@@ -3,34 +3,65 @@ name: validate-macos-tzdata-14908
 on: workflow_dispatch
 
 jobs:
-  probe:
+  validate:
     strategy:
       fail-fast: false
       matrix:
-        mode: [kick, nokick]
-    runs-on: macos-26
-    timeout-minutes: 25
+        os: [macos-26, macos-15, macos-26-intel, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     defaults:
       run:
         shell: bash {0}
     steps:
-      - name: Wait for tzdata asset (${{ matrix.mode }})
-        timeout-minutes: 15
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/14908-macos-tzdata
+
+      - name: Before
         run: |
-          echo "ImageVersion=$ImageVersion boot=$(sysctl -n kern.boottime)"
-          echo "start tzdata=$(cat /usr/share/zoneinfo/+VERSION)"
-          if [ "${{ matrix.mode }}" = kick ]; then
-            sudo launchctl print system/com.apple.timezoneupdates.tzd 2>&1 | grep -E '^\s*(state|program|path) ' | head -5
-            sudo launchctl kickstart -k system/com.apple.timezoneupdates.tzd; echo "kickstart rc=$?"
-          fi
+          echo "ImageVersion=$ImageVersion arch=$(uname -m) $(sw_vers -productVersion) $(sw_vers -buildVersion)"
+          csrutil status
+          echo "tzdata=$(cat /usr/share/zoneinfo/+VERSION) resolved=$(realpath /usr/share/zoneinfo)"
+          cat > /tmp/icu.swift <<'SWIFT'
+          import Foundation
+          print("Foundation/ICU tz data version: \(TimeZone.timeZoneDataVersion)")
+          SWIFT
+          swift /tmp/icu.swift
+
+      - name: Pester test before fix (expected to fail on macos-26)
+        continue-on-error: true
+        working-directory: images/macos/scripts/tests
+        run: pwsh -c 'Invoke-Pester ./System.Tests.ps1 -FullNameFilter "Time zone data*" -Output Detailed -CI'
+
+      - name: Run configure-tzdata.sh the way the template does
+        run: |
+          chmod +x images/macos/scripts/build/configure-tzdata.sh
           start=$(date +%s)
-          while :; do
-            el=$(( $(date +%s) - start ))
-            tgt=$(readlink /var/db/timezone/zoneinfo)
-            v=$(cat /usr/share/zoneinfo/+VERSION)
-            echo "+${el}s tzdata=$v zoneinfo->$tgt"
-            case "$tgt" in /var/db/timezone/tz/*) echo "SWITCHED after ${el}s"; break ;; esac
-            [ $el -ge 840 ] && { echo "NOT switched after ${el}s"; break; }
-            sleep 10
-          done
+          sudo images/macos/scripts/build/configure-tzdata.sh; rc=$?
+          echo "exit=$rc after $(( $(date +%s) - start ))s"
+          exit $rc
+
+      - name: After
+        run: |
           ls -la /var/db/timezone
+          echo "tzdata=$(cat /usr/share/zoneinfo/+VERSION) resolved=$(realpath /usr/share/zoneinfo)"
+          echo "localtime -> $(readlink /etc/localtime) ($(date))"
+          TZ=America/New_York date; TZ=Asia/Tbilisi date
+          swift /tmp/icu.swift
+
+      - name: Second run is a no-op
+        run: sudo images/macos/scripts/build/configure-tzdata.sh
+
+      - name: Does tzd keep the switch after restart?
+        run: |
+          sudo launchctl kickstart -k system/com.apple.timezoneupdates.tzd; echo "kickstart rc=$?"
+          sleep 90
+          echo "zoneinfo -> $(readlink /var/db/timezone/zoneinfo)"
+          echo "icutz    -> $(readlink /var/db/timezone/icutz)"
+          echo "tzdata=$(cat /usr/share/zoneinfo/+VERSION)"
+          sudo ls /System/Library/AssetsV2 | grep -i timezone || echo "no TimeZoneUpdate asset dir"
+
+      - name: Pester test after fix
+        working-directory: images/macos/scripts/tests
+        run: pwsh -c 'Invoke-Pester ./System.Tests.ps1 -FullNameFilter "Time zone data*" -Output Detailed -CI'
