@@ -7,42 +7,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, macos-26-intel, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+        mode: [kick, nokick]
+    runs-on: macos-26
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash {0}
     steps:
-      - name: Before
+      - name: Wait for tzdata asset (${{ matrix.mode }})
+        timeout-minutes: 15
         run: |
-          echo "ImageVersion=$ImageVersion arch=$(uname -m) $(sw_vers -productVersion) $(sw_vers -buildVersion)"
-          echo "tzdata: $(cat /usr/share/zoneinfo/+VERSION)"
-          ls -la /var/db/timezone
-          echo "--- AssetsV2 entries"; sudo ls /System/Library/AssetsV2 2>&1
-          echo "--- tzd launchd job"
-          ls -la /System/Library/LaunchDaemons/ 2>&1 | grep -i -E 'tzd|timezone|mobileasset'
-          sudo launchctl print system/com.apple.tzd 2>&1 | grep -E 'state|path|program|last exit' | head
-          sudo launchctl print-disabled system 2>&1 | grep -i -E 'tzd|mobileasset' || echo "tzd/mobileassetd not in disabled list"
-          echo "--- TimeZoneUpdate catalog xml (if any)"
-          sudo find /System/Library/AssetsV2 -maxdepth 2 -iname '*TimeZone*' -print 2>&1
-          echo "--- reachability of Apple asset server"
-          curl -sS -o /dev/null -w 'mesu.apple.com %{http_code} %{time_total}s\n' https://mesu.apple.com/assets/ 2>&1
-
-      - name: Kick tzd and wait for asset download
-        timeout-minutes: 12
-        run: |
-          sudo launchctl kickstart -k system/com.apple.tzd 2>&1
-          for i in $(seq 1 20); do
+          echo "ImageVersion=$ImageVersion boot=$(sysctl -n kern.boottime)"
+          echo "start tzdata=$(cat /usr/share/zoneinfo/+VERSION)"
+          if [ "${{ matrix.mode }}" = kick ]; then
+            sudo launchctl print system/com.apple.timezoneupdates.tzd 2>&1 | grep -E '^\s*(state|program|path) ' | head -5
+            sudo launchctl kickstart -k system/com.apple.timezoneupdates.tzd; echo "kickstart rc=$?"
+          fi
+          start=$(date +%s)
+          while :; do
+            el=$(( $(date +%s) - start ))
+            tgt=$(readlink /var/db/timezone/zoneinfo)
             v=$(cat /usr/share/zoneinfo/+VERSION)
-            echo "$(date -u +%T) tzdata=$v tz_dir=$(ls /var/db/timezone/tz 2>/dev/null | tr '\n' ' ')"
-            [ -d /var/db/timezone/tz ] && break
-            sleep 30
+            echo "+${el}s tzdata=$v zoneinfo->$tgt"
+            case "$tgt" in /var/db/timezone/tz/*) echo "SWITCHED after ${el}s"; break ;; esac
+            [ $el -ge 840 ] && { echo "NOT switched after ${el}s"; break; }
+            sleep 10
           done
-
-      - name: After + logs
-        run: |
-          echo "tzdata: $(cat /usr/share/zoneinfo/+VERSION)"
-          ls -la /var/db/timezone /var/db/timezone/tz 2>&1
-          sudo log show --last 30m --style compact \
-            --predicate 'process == "tzd" OR eventMessage CONTAINS[c] "TimeZoneUpdate"' 2>&1 | tail -50
+          ls -la /var/db/timezone
