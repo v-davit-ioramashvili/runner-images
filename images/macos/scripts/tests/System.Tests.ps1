@@ -45,3 +45,13 @@ Describe "Screen capture approval" {
         defaults read $approvalsPlist "/opt/hca/hosted-compute-agent" | Out-String | Should -Match "3024"
     }
 }
+
+Describe "Time zone data" {
+    It "Uses the downloaded tzdata instead of the OS-bundled copy" {
+        # https://github.com/actions/runner-images/issues/14908
+        $activeVersion = Get-Content "/usr/share/zoneinfo/+VERSION"
+        $bundledVersion = Get-Content "/usr/share/zoneinfo.default/+VERSION"
+        Write-Host "  [i] Active tzdata: $activeVersion; OS-bundled tzdata: $bundledVersion"
+        realpath /usr/share/zoneinfo | Should -Match "^/private/var/db/timezone/tz/"
+    }
+}
