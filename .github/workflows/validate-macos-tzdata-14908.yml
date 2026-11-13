@@ -7,87 +7,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel, xcode-27]
+        os: [macos-26, macos-26-intel, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
       run:
         shell: bash {0}
     steps:
-      - name: Image and OS
+      - name: Before
         run: |
-          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"
-          sw_vers
+          echo "ImageVersion=$ImageVersion arch=$(uname -m) $(sw_vers -productVersion) $(sw_vers -buildVersion)"
+          echo "tzdata: $(cat /usr/share/zoneinfo/+VERSION)"
+          ls -la /var/db/timezone
+          echo "--- AssetsV2 entries"; sudo ls /System/Library/AssetsV2 2>&1
+          echo "--- tzd launchd job"
+          ls -la /System/Library/LaunchDaemons/ 2>&1 | grep -i -E 'tzd|timezone|mobileasset'
+          sudo launchctl print system/com.apple.tzd 2>&1 | grep -E 'state|path|program|last exit' | head
+          sudo launchctl print-disabled system 2>&1 | grep -i -E 'tzd|mobileasset' || echo "tzd/mobileassetd not in disabled list"
+          echo "--- TimeZoneUpdate catalog xml (if any)"
+          sudo find /System/Library/AssetsV2 -maxdepth 2 -iname '*TimeZone*' -print 2>&1
+          echo "--- reachability of Apple asset server"
+          curl -sS -o /dev/null -w 'mesu.apple.com %{http_code} %{time_total}s\n' https://mesu.apple.com/assets/ 2>&1
 
-      - name: tzdata version
+      - name: Kick tzd and wait for asset download
+        timeout-minutes: 12
         run: |
-          echo "zoneinfo/+VERSION:         $(cat /usr/share/zoneinfo/+VERSION 2>&1)"
-          echo "zoneinfo.default/+VERSION: $(cat /usr/share/zoneinfo.default/+VERSION 2>&1)"
-          for v in /var/db/timezone/tz/*/zoneinfo/+VERSION; do echo "$v: $(cat "$v")"; done
-
-      - name: Symlink chain
-        run: |
-          for p in /usr/share/zoneinfo /var/db/timezone/zoneinfo /etc/localtime; do
-            echo "== $p"
-            cur="$p"
-            while [ -L "$cur" ]; do
-              nxt=$(readlink "$cur"); echo "  $cur -> $nxt"
-              case "$nxt" in /*) cur="$nxt" ;; *) cur="$(dirname "$cur")/$nxt" ;; esac
-            done
-            echo "  resolved: $(realpath "$p" 2>&1)"
+          sudo launchctl kickstart -k system/com.apple.tzd 2>&1
+          for i in $(seq 1 20); do
+            v=$(cat /usr/share/zoneinfo/+VERSION)
+            echo "$(date -u +%T) tzdata=$v tz_dir=$(ls /var/db/timezone/tz 2>/dev/null | tr '\n' ' ')"
+            [ -d /var/db/timezone/tz ] && break
+            sleep 30
           done
 
-      - name: /var/db/timezone listing
+      - name: After + logs
         run: |
-          ls -la /var/db/timezone /var/db/timezone/tz
-          echo "--- mtimes (when each tz version landed)"
-          stat -f '%Sm  %N' /var/db/timezone/tz/* /var/db/timezone/zoneinfo
-          echo "--- /usr/share/zoneinfo* entries"
-          ls -lad /usr/share/zoneinfo*
-
-      - name: TimeZone MobileAsset
-        run: |
-          for d in /System/Library/AssetsV2 /private/var/MobileAsset/AssetsV2; do
-            echo "== $d"
-            sudo ls -la "$d" 2>&1 | grep -i -E 'timezone|tz' || echo "  (no time zone asset dir)"
-            for a in "$d"/com_apple_MobileAsset_TimeZoneUpdate*; do
-              [ -e "$a" ] || continue
-              sudo find "$a" -maxdepth 3 -print 2>&1 | head -30
-              sudo find "$a" -name '+VERSION' -exec sh -c 'echo "{}: $(cat "{}")"' \; 2>&1
-            done
-          done
-
-      - name: Update settings (are background updates disabled?)
-        run: |
-          echo "--- softwareupdate --schedule"
-          softwareupdate --schedule 2>&1
-          echo "--- system domain /Library/Preferences/com.apple.SoftwareUpdate"
-          sudo defaults read /Library/Preferences/com.apple.SoftwareUpdate 2>&1
-          echo "--- user domain com.apple.SoftwareUpdate ($(whoami))"
-          defaults read com.apple.SoftwareUpdate 2>&1
-          echo "--- root user domain com.apple.SoftwareUpdate"
-          sudo defaults read com.apple.SoftwareUpdate 2>&1
-          echo "--- managed prefs"
-          sudo ls -la /Library/Managed\ Preferences 2>&1
-          sudo profiles list -all 2>&1 | head -20
-          echo "--- launchd: disabled services (asset/update/tz related)"
-          sudo launchctl print-disabled system 2>&1 | grep -i -E 'asset|softwareupdate|tzd|timezone|configdata' || echo "  none"
-          echo "--- launchd: loaded services (asset/update/tz related)"
-          sudo launchctl list 2>&1 | grep -i -E 'mobileasset|softwareupdate|tzd|timezone' || echo "  none"
-          pgrep -l -f 'tzd|mobileassetd|softwareupdated' || echo "  no tzd/mobileassetd/softwareupdated process"
-
-      - name: Install history (time zone / config data)
-        run: |
-          softwareupdate --history --all 2>&1 | grep -i -E 'time ?zone|config|xprotect|^Display' | head -40
-          echo "--- pkgutil"
-          pkgutil --pkgs 2>&1 | grep -i -E 'timezone|tzdata|configdata' || echo "  none"
-
-      - name: tzd / mobileasset logs (last 24h)
-        run: |
-          sudo log show --last 24h --style compact \
-            --predicate 'process == "tzd" OR (process == "mobileassetd" AND eventMessage CONTAINS[c] "TimeZone")' 2>&1 | tail -40
-
-      - name: Config data updates offered right now
-        timeout-minutes: 10
-        run: |
-          softwareupdate --list --include-config-data 2>&1 | tail -30
+          echo "tzdata: $(cat /usr/share/zoneinfo/+VERSION)"
+          ls -la /var/db/timezone /var/db/timezone/tz 2>&1
+          sudo log show --last 30m --style compact \
+            --predicate 'process == "tzd" OR eventMessage CONTAINS[c] "TimeZoneUpdate"' 2>&1 | tail -50
