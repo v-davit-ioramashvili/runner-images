@@ -1,0 +1,57 @@
+# TEMPORARY - validation aid for the Apache Lounge switch. Delete before opening the PR.
+name: Validate Apache Lounge install
+on:
+  push:
+    branches: ['validate/apache-lounge*']
+  workflow_dispatch:
+jobs:
+  apache:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-2025-vs2026, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Before - image and currently installed Apache
+        shell: pwsh
+        run: |
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          & C:\tools\Apache24\bin\httpd.exe -v
+          foreach ($d in 'vcruntime140.dll','msvcp140.dll') { "$d " + (Get-Item "C:\Windows\System32\$d").VersionInfo.ProductVersion }
+      - name: Stage image layout and remove the chocolatey Apache
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\image\tests, "$env:RUNNER_TEMP\imgtemp" | Out-Null
+          Copy-Item images\windows\scripts\tests\* C:\image\tests\ -Recurse -Force
+          Stop-Service Apache -ErrorAction SilentlyContinue
+          & C:\tools\Apache24\bin\httpd.exe -k uninstall -n Apache
+          Remove-Item C:\tools\Apache24 -Recurse -Force
+          if (Get-Service Apache -ErrorAction SilentlyContinue) { throw "service still registered" }
+      - name: Run Install-Apache.ps1 (Windows PowerShell, as packer does)
+        shell: powershell
+        env:
+          TEMP_DIR: ${{ runner.temp }}\imgtemp
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module "$env:GITHUB_WORKSPACE\images\windows\scripts\helpers\ImageHelpers.psd1" -Force
+          Import-Module "$env:GITHUB_WORKSPACE\images\windows\scripts\tests\Helpers.psm1" -Force -DisableNameChecking
+          & "$env:GITHUB_WORKSPACE\images\windows\scripts\build\Install-Apache.ps1"
+      - name: After - versions, config, start/serve/stop, software report
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & C:\tools\Apache24\bin\httpd.exe -V
+          & C:\tools\Apache24\bin\openssl.exe version
+          Get-ChildItem C:\tools\Apache24\bin\*.dll | Where-Object Name -match 'ssl|crypto|nghttp2|curl|libapr-|zlib' | Select-Object Name, @{n='Ver';e={$_.VersionInfo.ProductVersion}} | Format-Table -AutoSize
+          Select-String C:\tools\Apache24\conf\httpd.conf -Pattern '^Define SRVROOT|^Listen'
+          & C:\tools\Apache24\bin\httpd.exe -t; if ($LASTEXITCODE) { throw "config test failed" }
+          Get-Service Apache | Format-List Name, Status, StartType
+          # functional check: start, request, stop, restore disabled state
+          Stop-Service w3svc -ErrorAction SilentlyContinue
+          Set-Service Apache -StartupType Manual; Start-Service Apache
+          (Invoke-WebRequest http://localhost/ -UseBasicParsing).StatusCode
+          Stop-Service Apache; Set-Service Apache -StartupType Disabled
+          Import-Module .\images\windows\scripts\docs-gen\SoftwareReport.WebServers.psm1 -DisableNameChecking
+          "Software report version: $(Get-ApacheVersion)"
