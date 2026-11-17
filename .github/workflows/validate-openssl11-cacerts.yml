@@ -94,7 +94,7 @@ jobs:
         run: |
           set -x
           source ~/utils/utils.sh
-          brew info ca-certificates | head -3
+          brew info ca-certificates > "$RUNNER_TEMP/ca-info.txt"; head -3 "$RUNNER_TEMP/ca-info.txt"
           brew_smart_install "ruby@3.3"
           "$(brew --prefix ruby@3.3)/bin/ruby" -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
           brew_smart_install rustup
