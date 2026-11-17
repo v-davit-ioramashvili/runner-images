@@ -33,16 +33,19 @@ jobs:
   # macOS jobs in 44133041888 were all cancelled for lack of arm64 capacity, so
   # the later-steps and stale-pin questions also run on Linux Homebrew 7.0.14
   # with the same two pinned formula files the fix downloads.
+  # Run 44137145829: later steps (ruby@3.3, rustup, hello) work after the fix,
+  # but a pinned ca-certificates.rb OLDER than the installed one makes the
+  # openssl@1.1 install pour that older ca-certificates ("2026-11-05 -> 2026-10-20").
+  # keg-copy puts the installed keg's own formula file in the tap instead, so the
+  # versions always match and there is no pin to go stale.
   linux-brew:
     strategy:
       fail-fast: false
       matrix:
-        pin:
-          - { name: current, commit: 5367b4e0885b7f463a8bb756b35a9ee446df2585 }
-          - { name: stale, commit: ddecfafe263bc2b7c34528327a4f30b0bfbcc13b }
+        variant: [stale-pin, keg-copy]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    name: linux / ${{ matrix.pin.name }} pin
+    name: linux / ${{ matrix.variant }}
     defaults:
       run:
         shell: bash
@@ -54,42 +57,47 @@ jobs:
           $B update
           $B install ca-certificates openssl@4
           $B --version | head -1
-          $B list --versions ca-certificates
 
-      - name: Install openssl@1.1 the way the fixed script does
+      - name: Install openssl@1.1 (${{ matrix.variant }})
         run: |
           set -x
           CORE="$(brew --repository)/Library/Taps/homebrew/homebrew-core"
           mkdir -p "$CORE/Formula/o" "$CORE/Formula/c"
           curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/d91dabd087cb0b906c92a825df9e5e5e1a4f59f8/Formula/o/openssl@1.1.rb" -o "$CORE/Formula/o/openssl@1.1.rb"
-          curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/${{ matrix.pin.commit }}/Formula/c/ca-certificates.rb" -o "$CORE/Formula/c/ca-certificates.rb"
+          if [ "${{ matrix.variant }}" = "stale-pin" ]; then
+            curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/ddecfafe263bc2b7c34528327a4f30b0bfbcc13b/Formula/c/ca-certificates.rb" -o "$CORE/Formula/c/ca-certificates.rb"
+          else
+            CA_VERSION="$(brew list --versions ca-certificates | awk '{print $NF}')"
+            cp "$(brew --cellar ca-certificates)/$CA_VERSION/.brew/ca-certificates.rb" "$CORE/Formula/c/ca-certificates.rb"
+          fi
           grep -m1 'url "' "$CORE/Formula/c/ca-certificates.rb"
+          echo "--- before"
+          ls "$(brew --cellar ca-certificates)"; readlink "$(brew --prefix)/opt/ca-certificates"
           brew unlink openssl@4
-          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1 2>&1 | tee "$RUNNER_TEMP/install.txt"
           brew unlink openssl@1.1
           brew link openssl@4
-          brew list --versions ca-certificates openssl@1.1
+          echo "--- after"
+          ls "$(brew --cellar ca-certificates)"; readlink "$(brew --prefix)/opt/ca-certificates"
+          if grep -q "ca-certificates.*->" "$RUNNER_TEMP/install.txt"; then echo "RESULT: ca-certificates version CHANGED"; else echo "RESULT: ca-certificates untouched"; fi
           "$(brew --prefix openssl@1.1)/bin/openssl" version
 
       - name: Later build steps still work
         run: |
           set -x
           export HOMEBREW_NO_AUTO_UPDATE=1
-          brew info ca-certificates > "$RUNNER_TEMP/ca-info.txt"; head -3 "$RUNNER_TEMP/ca-info.txt"
-          brew install ruby@3.3
+          brew install ruby@3.3 rustup hello
           "$(brew --prefix ruby@3.3)/bin/ruby" -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
-          brew install rustup hello
           hello
-          brew list --versions ca-certificates openssl@1.1 openssl@3 openssl@4
-          brew outdated || true
-          brew upgrade --dry-run ca-certificates || true
+          brew list --versions ca-certificates openssl@1.1 openssl@4
+          ls "$(brew --cellar ca-certificates)"; readlink "$(brew --prefix)/opt/ca-certificates"
 
   install-openssl:
     strategy:
       fail-fast: false
       matrix:
-        image: [macos-26, macos-15]
-        pin: [current, stale]
+        image: [macos-15]
+        pin: [current]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 30
     defaults:
