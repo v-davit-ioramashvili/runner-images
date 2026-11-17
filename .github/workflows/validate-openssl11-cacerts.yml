@@ -96,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [macos-15]
+        image: [macos-15, macos-26]
         pin: [current]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 30
