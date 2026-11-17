@@ -304,7 +304,7 @@
     },
     "apache": {
         "version": "2.4.71-261112",
-        "url": "MIRROR_URL_TBD/httpd-2.4.71-261112-Win64-VS18.zip",
+        "url": "https://github.com/v-davit-ioramashvili/runner-images/releases/download/apache-mirror-validation-2.4.71-261112/httpd-2.4.71-261112-Win64-VS18.zip",
         "checksum": "44961A929DFF16B767B3ADBCEA55760A942A00239B2891DC55806BE34029E1FC"
     },
     "kotlin": {
