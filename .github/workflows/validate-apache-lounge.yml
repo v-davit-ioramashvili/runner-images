@@ -23,14 +23,16 @@ jobs:
       - name: Diagnose Lounge redirects (PS 5.1)
         shell: powershell
         run: |
-          foreach ($u in 'https://www.apachelounge.com/download/','https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.71-261112-Win64-VS18.zip.txt','https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.71-261112-Win64-VS18.zip') {
-            $r = [System.Net.HttpWebRequest]::Create($u); $r.AllowAutoRedirect = $false; $r.Method = 'HEAD'
+          $u = 'https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.71-261112-Win64-VS18.zip.txt'
+          $defaultUA = 'Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/' + $PSVersionTable.PSVersion
+          foreach ($ua in @('', $defaultUA)) {
+            $r = [System.Net.HttpWebRequest]::Create($u); $r.AllowAutoRedirect = $false; $r.Method = 'GET'
+            if ($ua) { $r.UserAgent = $ua }
             try { $resp = $r.GetResponse() } catch { $resp = $_.Exception.InnerException.Response }
-            "$u -> $([int]$resp.StatusCode) Location=$($resp.Headers['Location']) Server=$($resp.Headers['Server'])"
+            "UA='$ua' -> $([int]$resp.StatusCode) Location=$($resp.Headers['Location'])"
             $resp.Close()
-            try { $g = Invoke-WebRequest -Uri $u -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop; "  IWR GET -> $($g.StatusCode)" }
-            catch { $x = $_.Exception.Response; "  IWR GET -> $([int]$x.StatusCode) Location=$($x.Headers['Location'])" }
           }
+          "TLS: $([Net.ServicePointManager]::SecurityProtocol)"
       - name: Stage image layout and remove the chocolatey Apache
         shell: pwsh
         run: |
