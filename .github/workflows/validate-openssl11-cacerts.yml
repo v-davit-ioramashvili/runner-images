@@ -9,6 +9,12 @@
 #                              pinning ca-certificates.rb and a local tap both fix it;
 #                              the Custom-Formula path from #15325 fails.
 #   44115417141              - pinned ca-certificates passes on macOS 26 arm64.
+#   44124611324              - real fixed script passes on macOS 26 arm64.
+#
+# This iteration adds: later build steps after the fix (install-ruby/rust style
+# installs, outdated/upgrade checks), and a "stale" pin where the pinned
+# ca-certificates.rb (2026-10-20) is older than the installed one (2026-11-05),
+# which is what happens once ca-certificates gets a new release after this pin.
 #
 # This iteration runs the real install-openssl.sh from the fix branch
 # macos-openssl11-pin-cacerts. Each job first undoes what the image already did
@@ -28,7 +34,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [macos-15, macos-14, macos-26]
+        image: [macos-26, macos-15]
+        pin: [current, stale]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 30
     defaults:
@@ -65,6 +72,13 @@ jobs:
             fi
           } >> ~/utils/utils.sh
 
+      - name: Use an older ca-certificates pin (stale case)
+        if: matrix.pin == 'stale'
+        run: |
+          sed -i '' 's/^  CA_COMMIT=.*/  CA_COMMIT=ddecfafe263bc2b7c34528327a4f30b0bfbcc13b/' images/macos/scripts/build/install-openssl.sh
+          grep -n "CA_COMMIT=" images/macos/scripts/build/install-openssl.sh
+          brew list --versions ca-certificates
+
       - name: Run install-openssl.sh from the fix branch
         run: bash -e -o pipefail images/macos/scripts/build/install-openssl.sh
 
@@ -76,7 +90,17 @@ jobs:
           openssl version | grep -q "OpenSSL 1.1"
           "$(brew --prefix openssl@4)/bin/openssl" version
 
-      - name: Later Homebrew installs still work
+      - name: Later build steps still work
         run: |
-          brew install hello
+          set -x
+          source ~/utils/utils.sh
+          brew info ca-certificates | head -3
+          brew_smart_install "ruby@3.3"
+          "$(brew --prefix ruby@3.3)/bin/ruby" -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
+          brew_smart_install rustup
+          brew_smart_install hello
           hello
+          brew list --versions ca-certificates openssl@1.1 openssl@3 openssl@4
+          brew outdated || true
+          brew upgrade --dry-run ca-certificates || true
+          openssl version | grep -q "OpenSSL 1.1"
