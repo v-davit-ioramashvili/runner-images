@@ -30,13 +30,17 @@ jobs:
   openssl11:
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # macOS arm64 jobs were cancelled for lack of runner capacity in runs
+      # 44090072051 and 44092865013, so the variants run on Linux Homebrew
+      # (same formula loading code; openssl@1.1 has an x86_64_linux bottle and
+      # the same single ca-certificates dependency). The winner is then
+      # confirmed on macOS arm64.
       matrix:
-        image: [macos-15]
-        variant: [repro-fresh-ca, pin-ca, local-tap, custom-formula]
+        image: [ubuntu-24.04]
+        variant: [repro, repro-fresh-ca, pin-ca, local-tap, custom-formula]
         brew: [latest]
         include:
-          - image: macos-15
+          - image: ubuntu-24.04
             variant: repro
             brew: '7.0.12'
     runs-on: ${{ matrix.image }}
@@ -47,6 +51,14 @@ jobs:
         shell: bash
 
     steps:
+      - name: Prepare Linux Homebrew like the macOS image
+        if: runner.os == 'Linux'
+        run: |
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+          /home/linuxbrew/.linuxbrew/bin/brew update
+          /home/linuxbrew/.linuxbrew/bin/brew install ca-certificates openssl@4
+
       - name: Reset openssl@1.1 to pre-install state
         run: |
           CORE="$(brew --repository)/Library/Taps/homebrew/homebrew-core"
