@@ -1,0 +1,58 @@
+name: validate-msrc-windows-cves
+on:
+  push:
+    branches: [validate/msrc-windows-cves]
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-2025-vs2026, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Probe component versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function H($t) { "`n===== $t =====" }
+          H 'Image'; "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"; [Environment]::OSVersion.VersionString; $env:PROCESSOR_ARCHITECTURE
+
+          H 'Apache'
+          $ap = (Get-Item C:\tools\apache* -ErrorAction SilentlyContinue).FullName; "Path: $ap"
+          & "$ap\bin\httpd.exe" -V
+          Get-ChildItem "$ap\bin" -Filter *.dll | Select-Object Name, @{n='FileVersion';e={$_.VersionInfo.FileVersion}}, @{n='Product';e={$_.VersionInfo.ProductVersion}} | Format-Table -AutoSize | Out-String -Width 300
+          Get-ChildItem "$ap\bin" -Filter openssl.exe | ForEach-Object { & $_.FullName version -a }
+          'Enabled LoadModule lines:'; Select-String -Path "$ap\conf\httpd.conf" -Pattern '^\s*LoadModule' | ForEach-Object { $_.Line.Trim() }
+          'Proxy/rewrite/uwsgi modules on disk:'; Get-ChildItem "$ap\modules" -Filter 'mod_*' | Where-Object Name -match 'proxy|rewrite' | Select-Object -ExpandProperty Name
+          Get-Service Apache | Select-Object Name, Status, StartType | Format-List
+          choco list apache-httpd --exact
+
+          H 'OpenSSL (PATH)'
+          Get-Command openssl -All | Select-Object -ExpandProperty Source
+          openssl version -a
+          choco list openssl --exact
+
+          H 'All libssl/libcrypto/openssl.exe copies'
+          $roots = 'C:\Program Files', 'C:\Program Files (x86)', 'C:\tools', 'C:\Strawberry', 'C:\hostedtoolcache\windows\Python', 'C:\php'
+          Get-ChildItem $roots -Recurse -Include 'libcrypto*.dll','libssl*.dll','openssl.exe' -ErrorAction SilentlyContinue |
+            Select-Object @{n='Ver';e={$_.VersionInfo.ProductVersion}}, FullName | Sort-Object FullName | Format-Table -AutoSize | Out-String -Width 400
+
+          H 'Git / Git LFS'
+          Get-Command git -All | Select-Object -ExpandProperty Source
+          git --version; git lfs version
+          Get-Command git-lfs -All | Select-Object -ExpandProperty Source
+          & 'C:\Program Files\Git\mingw64\bin\openssl.exe' version
+          & 'C:\Program Files\Git\mingw64\bin\curl.exe' --version | Select-Object -First 1
+          if (Get-Command go -ErrorAction SilentlyContinue) {
+            go version
+            Get-Command git-lfs -All | ForEach-Object { "-- go version -m $($_.Source)"; go version -m $_.Source | Select-Object -First 25 }
+          }
+
+          H 'Docker'
+          docker version
+          docker compose version
+          Get-Command docker, dockerd, docker-compose, containerd -All -ErrorAction SilentlyContinue | Select-Object Source, Version | Format-Table -AutoSize | Out-String -Width 300
+          if (Get-Command go -ErrorAction SilentlyContinue) {
+            foreach ($b in 'docker','dockerd') { $c = Get-Command $b -ErrorAction SilentlyContinue; if ($c) { "-- go version -m $($c.Source)"; go version -m $c.Source | Select-String -Pattern '^\S|\spath|\sgolang.org/x/(net|crypto)|containerd|runc|buildkit|grpc' | Select-Object -First 25 } }
+          }
