@@ -2,15 +2,18 @@
 #   "Error: No formulae or casks found for ca-certificates."
 # in install-openssl.sh. Not for merge.
 #
-# Each job undoes what the image already did for openssl@1.1 (keg, symlink,
-# partial homebrew-core tap folder), updates Homebrew the way the arm64 build
-# does, then installs openssl@1.1 one way:
-#   repro          - exactly what install-openssl.sh does on main (failed on 7.0.14, run 44090072051)
-#   repro-fresh-ca - same, with ca-certificates upgraded first (the runner's copy is outdated)
-#   pin-ca         - same, plus a pinned ca-certificates.rb in the local tap
-#   local-tap      - pinned formula in a separate local tap, API left on
-#   custom-formula - helper change from #15325 (Custom-Formula path, path install)
-# repro also runs on Homebrew 7.0.12 to check whether a Homebrew release broke it.
+# Earlier iterations (same branch):
+#   44090072051, 44092865013 - reproduced on Homebrew 7.0.14 (macOS 15 arm64);
+#                              an up-to-date ca-certificates still fails.
+#   44099173723 (Linux)      - repro passes on 7.0.12, fails on 7.0.14;
+#                              pinning ca-certificates.rb and a local tap both fix it;
+#                              the Custom-Formula path from #15325 fails.
+#   44115417141              - pinned ca-certificates passes on macOS 26 arm64.
+#
+# This iteration runs the real install-openssl.sh from the fix branch
+# macos-openssl11-pin-cacerts. Each job first undoes what the image already did
+# for openssl@1.1 and updates Homebrew the way the arm64 build does. On macos-26
+# the Tahoe/GoldenGate checks are stubbed to false so the macOS 14/15 path runs.
 
 name: Validate openssl@1.1 ca-certificates
 
@@ -20,132 +23,60 @@ on:
     branches:
       - 'validate/macos-openssl11-cacerts'
 
-env:
-  HOMEBREW_NO_AUTO_UPDATE: 1
-  HOMEBREW_NO_INSTALL_CLEANUP: 1
-  OPENSSL11_COMMIT: d91dabd087cb0b906c92a825df9e5e5e1a4f59f8
-  CACERTS_COMMIT: 5367b4e0885b7f463a8bb756b35a9ee446df2585
-
 jobs:
-  openssl11:
+  install-openssl:
     strategy:
       fail-fast: false
-      # macOS arm64 jobs were cancelled for lack of runner capacity in runs
-      # 44090072051 and 44092865013, so the variants run on Linux Homebrew
-      # (same formula loading code; openssl@1.1 has an x86_64_linux bottle and
-      # the same single ca-certificates dependency). The winner is then
-      # confirmed on macOS arm64.
       matrix:
-        # Linux run 44099173723: repro fails on 7.0.14 and passes on 7.0.12,
-        # repro-fresh-ca and custom-formula fail, pin-ca and local-tap pass.
-        # This run confirms the two passing fixes on macOS arm64.
-        image: [macos-15, macos-26]  # macos-14 never got a runner in 44099540610
-        variant: [pin-ca, local-tap]
-        brew: [latest]
+        image: [macos-15, macos-14, macos-26]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 30
-    name: ${{ matrix.image }} / ${{ matrix.variant }} / brew ${{ matrix.brew }}
     defaults:
       run:
         shell: bash
 
     steps:
-      - name: Prepare Linux Homebrew like the macOS image
-        if: runner.os == 'Linux'
-        run: |
-          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
-          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
-          /home/linuxbrew/.linuxbrew/bin/brew update
-          /home/linuxbrew/.linuxbrew/bin/brew install ca-certificates openssl@4
+      - uses: actions/checkout@v4
+        with:
+          ref: macos-openssl11-pin-cacerts
 
       - name: Reset openssl@1.1 to pre-install state
         run: |
-          CORE="$(brew --repository)/Library/Taps/homebrew/homebrew-core"
-          echo "Homebrew on image: $(brew --version | head -1)"
-          echo "--- core tap folder on image"
-          find "$CORE" -name '*.rb' 2>/dev/null || echo "no core tap folder"
           brew list --versions openssl@1.1 ca-certificates openssl@3 openssl@4 || true
           brew uninstall --ignore-dependencies --force openssl@1.1 || true
           rm -f "$(brew --prefix)/bin/openssl"
-          rm -rf "$CORE"
-
-      - name: Set Homebrew version
-        run: |
-          if [ "${{ matrix.brew }}" = "latest" ]; then
-            brew update
-          else
-            git -C "$(brew --repository)" fetch -q --tags origin
-            git -C "$(brew --repository)" checkout -q "${{ matrix.brew }}"
-          fi
+          rm -rf "$(brew --repository)/Library/Taps/homebrew/homebrew-core"
+          brew update
           brew --version | head -1
+          if ! brew list --versions openssl@4 > /dev/null 2>&1; then
+            brew install openssl@4
+          fi
+          brew link --overwrite openssl@4
 
-      - name: Diagnostics before install
+      - name: Stage utils.sh like the image build
         run: |
-          brew list --versions ca-certificates openssl@3 openssl@4 || true
-          ls -la "$(brew --cellar)"/ca-certificates/*/.brew/ 2>&1 || true
-          echo "--- lookup with API"
-          brew info ca-certificates 2>&1 | head -3 || true
+          mkdir -p ~/utils
+          cp images/macos/scripts/helpers/utils.sh ~/utils/utils.sh
+          {
+            echo 'invoke_tests() { echo "invoke_tests $* (stubbed, checked in the next step)"; }'
+            if [ "${{ matrix.image }}" = "macos-26" ]; then
+              echo 'is_Tahoe() { false; }'
+              echo 'is_GoldenGate() { false; }'
+            fi
+          } >> ~/utils/utils.sh
 
-      - name: Install openssl@1.1 (${{ matrix.variant }})
+      - name: Run install-openssl.sh from the fix branch
+        run: bash -e -o pipefail images/macos/scripts/build/install-openssl.sh
+
+      - name: Check like OpenSSL.Tests.ps1 (macOS 14/15 contexts)
         run: |
           set -x
-          CORE="$(brew --repository)/Library/Taps/homebrew/homebrew-core"
-          URL="https://raw.githubusercontent.com/Homebrew/homebrew-core/$OPENSSL11_COMMIT/Formula/o/openssl@1.1.rb"
-
-          if brew list --versions openssl@4 > /dev/null 2>&1; then
-            brew unlink openssl@4
-          fi
-
-          case "${{ matrix.variant }}" in
-            repro)
-              mkdir -p "$CORE/Formula/o"
-              curl -fsSL "$URL" -o "$CORE/Formula/o/openssl@1.1.rb"
-              HOMEBREW_NO_INSTALL_FROM_API=1 brew info ca-certificates 2>&1 | head -3 || true
-              HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
-              ;;
-            repro-fresh-ca)
-              # same as repro, but ca-certificates is current first, like a fresh build
-              brew upgrade ca-certificates
-              brew list --versions ca-certificates
-              mkdir -p "$CORE/Formula/o"
-              curl -fsSL "$URL" -o "$CORE/Formula/o/openssl@1.1.rb"
-              HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
-              ;;
-            pin-ca)
-              mkdir -p "$CORE/Formula/o" "$CORE/Formula/c"
-              curl -fsSL "$URL" -o "$CORE/Formula/o/openssl@1.1.rb"
-              curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/$CACERTS_COMMIT/Formula/c/ca-certificates.rb" -o "$CORE/Formula/c/ca-certificates.rb"
-              HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
-              ;;
-            local-tap)
-              brew tap-new --no-git local/pinned
-              TAP="$(brew --repository local/pinned)"
-              curl -fsSL "$URL" -o "$TAP/Formula/openssl@1.1.rb"
-              brew install local/pinned/openssl@1.1
-              ;;
-            custom-formula)
-              P="$CORE/Custom-Formula/o/openssl@1.1.rb"
-              mkdir -p "$(dirname "$P")"
-              curl -fsSL "$URL" -o "$P"
-              HOMEBREW_NO_INSTALL_FROM_API=1 brew install "$P"
-              ;;
-          esac
-
-      - name: Finish like install-openssl.sh and check like OpenSSL.Tests.ps1
-        run: |
-          set -x
-          if brew list --versions openssl@4 > /dev/null 2>&1; then
-            brew unlink openssl@1.1
-            brew link openssl@4
-          fi
-          ln -sf "$(brew --prefix openssl@1.1)/bin/openssl" "$(brew --prefix)/bin/openssl"
-          test -d "$(brew --prefix openssl@1.1)"
           openssl version
-          openssl version | grep -q "^OpenSSL 1.1"
-          "$(brew --prefix openssl@4)/bin/openssl" version || true
+          test -d "$(brew --prefix openssl@1.1)"
+          openssl version | grep -q "OpenSSL 1.1"
+          "$(brew --prefix openssl@4)/bin/openssl" version
 
       - name: Later Homebrew installs still work
         run: |
           brew install hello
           hello
-          brew list --versions openssl@1.1 ca-certificates
