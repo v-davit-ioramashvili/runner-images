@@ -36,13 +36,12 @@ jobs:
       # the same single ca-certificates dependency). The winner is then
       # confirmed on macOS arm64.
       matrix:
-        image: [ubuntu-24.04]
-        variant: [repro, repro-fresh-ca, pin-ca, local-tap, custom-formula]
+        # Linux run 44099173723: repro fails on 7.0.14 and passes on 7.0.12,
+        # repro-fresh-ca and custom-formula fail, pin-ca and local-tap pass.
+        # This run confirms the two passing fixes on macOS arm64.
+        image: [macos-15, macos-14]
+        variant: [pin-ca, local-tap]
         brew: [latest]
-        include:
-          - image: ubuntu-24.04
-            variant: repro
-            brew: '7.0.12'
     runs-on: ${{ matrix.image }}
     timeout-minutes: 30
     name: ${{ matrix.image }} / ${{ matrix.variant }} / brew ${{ matrix.brew }}
