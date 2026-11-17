@@ -28,6 +28,8 @@ jobs:
             try { $resp = $r.GetResponse() } catch { $resp = $_.Exception.InnerException.Response }
             "$u -> $([int]$resp.StatusCode) Location=$($resp.Headers['Location']) Server=$($resp.Headers['Server'])"
             $resp.Close()
+            try { $g = Invoke-WebRequest -Uri $u -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop; "  IWR GET -> $($g.StatusCode)" }
+            catch { $x = $_.Exception.Response; "  IWR GET -> $([int]$x.StatusCode) Location=$($x.Headers['Location'])" }
           }
       - name: Stage image layout and remove the chocolatey Apache
         shell: pwsh
