@@ -60,3 +60,16 @@ jobs:
           Stop-Service Apache; Set-Service Apache -StartupType Disabled
           Import-Module .\images\windows\scripts\docs-gen\SoftwareReport.WebServers.psm1 -DisableNameChecking
           "Software report version: $(Get-ApacheVersion)"
+      - name: Debug software report version
+        shell: powershell
+        run: |
+          $s = Join-Path $env:RUNNER_TEMP 'report.ps1'
+          @'
+          Import-Module "$env:GITHUB_WORKSPACE\images\windows\scripts\docs-gen\SoftwareReport.WebServers.psm1" -DisableNameChecking
+          "Get-ApacheVersion=[$(Get-ApacheVersion)]"
+          $m = & C:\tools\Apache24\bin\httpd.exe -V | Select-String -Pattern "Apache/"
+          "count=$(@($m).Count) type=$($m.GetType().FullName)"
+          "tostring=" + [regex]::Escape($m.ToString())
+          "line=" + [regex]::Escape($m.Line)
+          '@ | Set-Content $s
+          pwsh -NoProfile -File $s
