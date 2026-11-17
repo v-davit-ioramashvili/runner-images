@@ -39,7 +39,7 @@ jobs:
         # Linux run 44099173723: repro fails on 7.0.14 and passes on 7.0.12,
         # repro-fresh-ca and custom-formula fail, pin-ca and local-tap pass.
         # This run confirms the two passing fixes on macOS arm64.
-        image: [macos-15, macos-14]
+        image: [macos-15, macos-26]  # macos-14 never got a runner in 44099540610
         variant: [pin-ca, local-tap]
         brew: [latest]
     runs-on: ${{ matrix.image }}
