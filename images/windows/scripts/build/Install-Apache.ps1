@@ -1,7 +1,7 @@
 ################################################################################
 ##  File:  Install-Apache.ps1
 ##  Desc:  Install Apache HTTP Server
-##  Supply chain security: Apache Lounge build - checksum validation
+##  Supply chain security: Apache - checksum validation
 ################################################################################
 
 # Stop w3svc service
@@ -10,30 +10,13 @@ if ($w3svcService) {
     Stop-Service $w3svcService
 }
 
-# Resolve the latest Win64 build from Apache Lounge (the chocolatey package is no longer updated)
-$baseUrl = "https://www.apachelounge.com"
-$downloadPage = Invoke-ScriptBlockWithRetry -Command {
-    Invoke-WebRequest -Uri "$baseUrl/download/" -UseBasicParsing
-}
-$archiveRelativeUrl = $downloadPage.Links.href `
-    | Where-Object { $_ -match "/binaries/httpd-2\.4\.\d+-\d+-Win64-VS\d+\.zip$" } `
-    | Select-Object -First 1
-if (-not $archiveRelativeUrl) {
-    throw "Unable to find Apache Win64 archive on $baseUrl/download/"
-}
-$archiveUrl = "$baseUrl$archiveRelativeUrl"
-$archiveName = Split-Path $archiveUrl -Leaf
-$archivePath = Invoke-DownloadWithRetry $archiveUrl
+# Apache Lounge build pinned in the toolset (the chocolatey package is no longer updated).
+# apachelounge.com blocks PowerShell downloads, so the verified archive is served from a mirror.
+$apacheToolset = (Get-ToolsetContent).apache
+$archivePath = Invoke-DownloadWithRetry $apacheToolset.url
 
 #region Supply chain security
-# Checksum file lists "SHA256-Checksum for: <file>:" followed by the hash on the next line
-$checksumFile = Get-Content (Invoke-DownloadWithRetry "$archiveUrl.txt")
-$checksumLine = $checksumFile | Select-String -Pattern "SHA256-Checksum for: $([regex]::Escape($archiveName))" -Context 0, 1
-$externalHash = $checksumLine.Context.PostContext | Select-String -Pattern "[A-Fa-f0-9]{64}" | ForEach-Object { $_.Matches.Value }
-if (-not $externalHash) {
-    throw "Unable to find SHA256 checksum for $archiveName"
-}
-Test-FileChecksum $archivePath -ExpectedSHA256Sum $externalHash
+Test-FileChecksum $archivePath -ExpectedSHA256Sum $apacheToolset.checksum
 #endregion
 
 # Extract to C:\tools\Apache24
