@@ -5,7 +5,8 @@
 # Each job undoes what the image already did for openssl@1.1 (keg, symlink,
 # partial homebrew-core tap folder), updates Homebrew the way the arm64 build
 # does, then installs openssl@1.1 one way:
-#   repro          - exactly what install-openssl.sh does on main
+#   repro          - exactly what install-openssl.sh does on main (failed on 7.0.14, run 44090072051)
+#   repro-fresh-ca - same, with ca-certificates upgraded first (the runner's copy is outdated)
 #   pin-ca         - same, plus a pinned ca-certificates.rb in the local tap
 #   local-tap      - pinned formula in a separate local tap, API left on
 #   custom-formula - helper change from #15325 (Custom-Formula path, path install)
@@ -29,9 +30,10 @@ jobs:
   openssl11:
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        image: [macos-15, macos-14]
-        variant: [repro, pin-ca, local-tap, custom-formula]
+        image: [macos-15]
+        variant: [repro-fresh-ca, pin-ca, local-tap, custom-formula]
         brew: [latest]
         include:
           - image: macos-15
@@ -88,6 +90,14 @@ jobs:
               mkdir -p "$CORE/Formula/o"
               curl -fsSL "$URL" -o "$CORE/Formula/o/openssl@1.1.rb"
               HOMEBREW_NO_INSTALL_FROM_API=1 brew info ca-certificates 2>&1 | head -3 || true
+              HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
+              ;;
+            repro-fresh-ca)
+              # same as repro, but ca-certificates is current first, like a fresh build
+              brew upgrade ca-certificates
+              brew list --versions ca-certificates
+              mkdir -p "$CORE/Formula/o"
+              curl -fsSL "$URL" -o "$CORE/Formula/o/openssl@1.1.rb"
               HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
               ;;
             pin-ca)
