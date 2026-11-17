@@ -27,6 +27,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force C:\image\tests, "$env:RUNNER_TEMP\imgtemp" | Out-Null
           Copy-Item images\windows\scripts\tests\* C:\image\tests\ -Recurse -Force
+          $toolset = @{ 'windows-2022'='toolset-2022.json'; 'windows-2025'='toolset-2025-vs2026.json'; 'windows-2025-vs2026'='toolset-2025-vs2026.json'; 'windows-11-arm'='toolset-win-11-vs2026-arm64.json' }['${{ matrix.os }}']
+          Copy-Item "images\windows\toolsets\$toolset" C:\image\toolset.json -Force
+          "toolset: $toolset"
           Stop-Service Apache -ErrorAction SilentlyContinue
           & C:\tools\Apache24\bin\httpd.exe -k uninstall -n Apache
           Remove-Item C:\tools\Apache24 -Recurse -Force
