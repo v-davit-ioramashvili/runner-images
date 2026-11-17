@@ -30,6 +30,60 @@ on:
       - 'validate/macos-openssl11-cacerts'
 
 jobs:
+  # macOS jobs in 44133041888 were all cancelled for lack of arm64 capacity, so
+  # the later-steps and stale-pin questions also run on Linux Homebrew 7.0.14
+  # with the same two pinned formula files the fix downloads.
+  linux-brew:
+    strategy:
+      fail-fast: false
+      matrix:
+        pin:
+          - { name: current, commit: 5367b4e0885b7f463a8bb756b35a9ee446df2585 }
+          - { name: stale, commit: ddecfafe263bc2b7c34528327a4f30b0bfbcc13b }
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    name: linux / ${{ matrix.pin.name }} pin
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare Homebrew like the arm64 build
+        run: |
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          B=/home/linuxbrew/.linuxbrew/bin/brew
+          $B update
+          $B install ca-certificates openssl@4
+          $B --version | head -1
+          $B list --versions ca-certificates
+
+      - name: Install openssl@1.1 the way the fixed script does
+        run: |
+          set -x
+          CORE="$(brew --repository)/Library/Taps/homebrew/homebrew-core"
+          mkdir -p "$CORE/Formula/o" "$CORE/Formula/c"
+          curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/d91dabd087cb0b906c92a825df9e5e5e1a4f59f8/Formula/o/openssl@1.1.rb" -o "$CORE/Formula/o/openssl@1.1.rb"
+          curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/${{ matrix.pin.commit }}/Formula/c/ca-certificates.rb" -o "$CORE/Formula/c/ca-certificates.rb"
+          grep -m1 'url "' "$CORE/Formula/c/ca-certificates.rb"
+          brew unlink openssl@4
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install openssl@1.1
+          brew unlink openssl@1.1
+          brew link openssl@4
+          brew list --versions ca-certificates openssl@1.1
+          "$(brew --prefix openssl@1.1)/bin/openssl" version
+
+      - name: Later build steps still work
+        run: |
+          set -x
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew info ca-certificates > "$RUNNER_TEMP/ca-info.txt"; head -3 "$RUNNER_TEMP/ca-info.txt"
+          brew install ruby@3.3
+          "$(brew --prefix ruby@3.3)/bin/ruby" -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
+          brew install rustup hello
+          hello
+          brew list --versions ca-certificates openssl@1.1 openssl@3 openssl@4
+          brew outdated || true
+          brew upgrade --dry-run ca-certificates || true
+
   install-openssl:
     strategy:
       fail-fast: false
