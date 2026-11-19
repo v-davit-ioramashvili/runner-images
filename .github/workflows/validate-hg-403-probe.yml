@@ -1,0 +1,48 @@
+# TEMPORARY - probe: does mercurial-scm.org return 403 to hosted runners?
+name: Probe hg 403
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'validate/hg-403-probe*'
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Runner info
+        run: |
+          hg --version | head -1 || echo "hg not installed"
+          curl -s https://api.ipify.org; echo
+      - name: HTTP status per URL
+        run: |
+          for u in \
+            "https://www.mercurial-scm.org/" \
+            "https://www.mercurial-scm.org/?cmd=capabilities" \
+            "https://repo.mercurial-scm.org/hg?cmd=capabilities" \
+            "https://foss.heptapod.net/mercurial/mercurial-devel"; do
+            for ua in "curl/8" "mercurial/proto-1.0 (Mercurial 6.9)"; do
+              code=$(curl -s -o /tmp/body -w "%{http_code}" -A "$ua" "$u")
+              echo "$code  [$ua]  $u"
+              if [ "$code" = "403" ]; then head -c 400 /tmp/body | tr '\n' ' '; echo; fi
+            done
+          done
+          echo "--- headers on 403 candidate ---"
+          curl -sSI "https://www.mercurial-scm.org/" | head -15
+      - name: hg clone (reporter's URL)
+        continue-on-error: true
+        run: hg clone https://www.mercurial-scm.org www-clone
+      - name: hg clone (real repo, shallow-ish)
+        continue-on-error: true
+        run: |
+          hg identify https://repo.mercurial-scm.org/hg
+          hg clone -r 6.9 https://repo.mercurial-scm.org/hg hg-clone && hg -R hg-clone log -l1
