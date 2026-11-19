@@ -1,41 +1,27 @@
-name: Validate 15367 clang-cl impact
+name: Validate 15367 workaround
 on:
   push:
     branches: [validate/15367-clangcl-impact]
 jobs:
-  probe:
+  workaround:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3, 4]
+        n: [1, 2, 3]
     runs-on: windows-2025-vs2026
     steps:
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Probe
+      - name: Use Clang bundled with Visual Studio
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$env:VCINSTALLDIR\Tools\Llvm\x64\bin"
+      - name: Build
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "ImageVersion=$env:ImageVersion"
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property catalog_productDisplayVersion
-          Write-Host "VS=$vs MSVC=$env:VCToolsVersion"
-          Write-Host "clang-cl on PATH: $((Get-Command clang-cl).Source)"
+          Write-Host "ImageVersion=$env:ImageVersion MSVC=$env:VCToolsVersion"
+          Write-Host "clang-cl: $((Get-Command clang-cl).Source)"
           clang-cl --version | Select-Object -First 1
-          $vsClang = Join-Path $env:VCINSTALLDIR 'Tools\Llvm\x64\bin\clang-cl.exe'
-          mkdir t | Out-Null; cd t
           "#include <atomic>`nint main(){std::atomic<int> a{0};return a.load();}" | Set-Content a.cpp
-          "#include <stdio.h>`nint main(void){puts(""hi"");return 0;}" | Set-Content c.c
           "cmake_minimum_required(VERSION 3.20)`nproject(p CXX)`nadd_executable(a a.cpp)" | Set-Content CMakeLists.txt
-          $r = [ordered]@{}
-          function T($name, [scriptblock]$sb) { & $sb *> "$name.log"; $r[$name] = if ($LASTEXITCODE -eq 0) {'PASS'} else {'FAIL'} }
-          T 'clang-cl PATH, C++ STL'   { clang-cl /nologo a.cpp /Fe:a1.exe }
-          T 'clang-cl PATH, plain C'   { clang-cl /nologo c.c /Fe:c1.exe }
-          T 'clang++ PATH, C++ STL'    { clang++ a.cpp -o a2.exe }
-          T 'cl.exe, C++ STL'          { cl /nologo /EHsc a.cpp /Fe:a3.exe }
-          T 'VS bundled clang-cl, C++' { & $vsClang /nologo a.cpp /Fe:a4.exe }
-          T 'CMake VS gen -T ClangCL'  { cmake -S . -B b1 -G "Visual Studio 18 2026" -T ClangCL; cmake --build b1 }
-          T 'CMake Ninja default'      { cmake -S . -B b2 -G Ninja; cmake --build b2 }
-          T 'CMake Ninja clang-cl'     { cmake -S . -B b3 -G Ninja -DCMAKE_CXX_COMPILER=clang-cl; cmake --build b3 }
-          $r.GetEnumerator() | ForEach-Object { Write-Host ("{0,-28} {1}" -f $_.Key, $_.Value) }
-          Select-String -Path b1\CMakeCache.txt -Pattern 'CMAKE_CXX_COMPILER:' -ErrorAction SilentlyContinue
-          Get-Content 'clang-cl PATH, C++ STL.log' | Select-String STL1000 | Select-Object -First 1
-          exit 0
+          clang-cl /nologo a.cpp /Fe:a1.exe; Write-Host "clang-cl direct: $LASTEXITCODE"
+          clang++ a.cpp -o a2.exe; Write-Host "clang++ direct: $LASTEXITCODE"
+          cmake -S . -B b -G Ninja -DCMAKE_CXX_COMPILER=clang-cl | Out-Null; cmake --build b | Out-Null; Write-Host "cmake ninja clang-cl: $LASTEXITCODE"
