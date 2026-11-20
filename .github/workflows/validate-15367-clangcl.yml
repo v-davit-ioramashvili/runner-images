@@ -1,27 +1,30 @@
-name: Validate 15367 workaround
+name: Validate 15367 VS LLVM contents
 on:
   push:
     branches: [validate/15367-clangcl-impact]
 jobs:
-  workaround:
+  compare:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3]
-    runs-on: windows-2025-vs2026
+        os: [windows-2025-vs2026, windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Use Clang bundled with Visual Studio
-        shell: pwsh
-        run: Add-Content $env:GITHUB_PATH "$env:VCINSTALLDIR\Tools\Llvm\x64\bin"
-      - name: Build
+      - name: Compare
         shell: pwsh
         run: |
-          Write-Host "ImageVersion=$env:ImageVersion MSVC=$env:VCToolsVersion"
-          Write-Host "clang-cl: $((Get-Command clang-cl).Source)"
-          clang-cl --version | Select-Object -First 1
-          "#include <atomic>`nint main(){std::atomic<int> a{0};return a.load();}" | Set-Content a.cpp
-          "cmake_minimum_required(VERSION 3.20)`nproject(p CXX)`nadd_executable(a a.cpp)" | Set-Content CMakeLists.txt
-          clang-cl /nologo a.cpp /Fe:a1.exe; Write-Host "clang-cl direct: $LASTEXITCODE"
-          clang++ a.cpp -o a2.exe; Write-Host "clang++ direct: $LASTEXITCODE"
-          cmake -S . -B b -G Ninja -DCMAKE_CXX_COMPILER=clang-cl | Out-Null; cmake --build b | Out-Null; Write-Host "cmake ninja clang-cl: $LASTEXITCODE"
+          Write-Host "ImageVersion=$env:ImageVersion"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {'ARM64'} else {'x64'}
+          $vsBin = Join-Path $vs "VC\Tools\Llvm\$arch\bin"
+          $saBin = 'C:\Program Files\LLVM\bin'
+          Write-Host "VS clang: $(& "$vsBin\clang.exe" --version | Select-Object -First 1)"
+          Write-Host "SA clang: $(& "$saBin\clang.exe" --version | Select-Object -First 1)"
+          $vsF = (Get-ChildItem $vsBin -File).Name | Sort-Object
+          $saF = (Get-ChildItem $saBin -File).Name | Sort-Object
+          Write-Host "VS count=$($vsF.Count) SA count=$($saF.Count)"
+          Write-Host "ONLY_IN_STANDALONE: $((Compare-Object $vsF $saF | Where-Object SideIndicator -eq '=>').InputObject -join ', ')"
+          Write-Host "ONLY_IN_VS: $((Compare-Object $vsF $saF | Where-Object SideIndicator -eq '<=').InputObject -join ', ')"
+          foreach ($t in 'clang-cl.exe','clang++.exe','lld-link.exe','libclang.dll','clang-tidy.exe','clang-format.exe','clangd.exe','llvm-ar.exe','llvm-profdata.exe','llvm-cov.exe','llvm-symbolizer.exe','lldb.exe') { Write-Host ("HAS {0,-20} VS={1} SA={2}" -f $t, (Test-Path "$vsBin\$t"), (Test-Path "$saBin\$t")) }
+          Write-Host "VS lib\clang: $((Get-ChildItem (Join-Path $vs "VC\Tools\Llvm\$arch\lib\clang") -Directory -ErrorAction SilentlyContinue).Name)"
+          Write-Host "PATH has VS llvm: $($env:PATH -like "*VC\Tools\Llvm*")"
