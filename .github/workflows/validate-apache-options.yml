@@ -1,0 +1,61 @@
+# TEMPORARY - probes Apache download sources and a from-source build. Not for a PR.
+name: Validate Apache options
+on:
+  push:
+    branches: ['validate/apache-options']
+jobs:
+  hosts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Probe download hosts
+        shell: powershell
+        run: |
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          $urls = [ordered]@{
+            'lounge'      = 'https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.71-261112-Win64-VS18.zip'
+            'fossies'     = 'https://fossies.org/windows/www/httpd-2.4.71-261112-Win64-VS18.zip'
+            'apache.org'  = 'https://downloads.apache.org/httpd/httpd-2.4.71.tar.gz'
+            'apache.org-sha512' = 'https://downloads.apache.org/httpd/httpd-2.4.71.tar.gz.sha512'
+            'apache.org-KEYS'   = 'https://downloads.apache.org/httpd/KEYS'
+          }
+          foreach ($k in $urls.Keys) {
+            $out = Join-Path $env:RUNNER_TEMP "$k.bin"
+            try { Invoke-WebRequest $urls[$k] -OutFile $out -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop; $iwr = "200 $((Get-Item $out).Length) bytes" }
+            catch { $iwr = "FAIL $([int]$_.Exception.Response.StatusCode) $($_.Exception.Message)" }
+            $c = & curl.exe -s -o NUL -w "%{http_code} %{size_download} bytes" $urls[$k]
+            "{0,-18} IWR: {1} | curl.exe(default UA): {2}" -f $k, $iwr, $c
+          }
+  build-from-source:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Build httpd 2.4.71 from apache.org source with vcpkg deps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $t = $env:RUNNER_TEMP
+          Invoke-WebRequest https://downloads.apache.org/httpd/httpd-2.4.71.tar.gz -OutFile "$t\httpd.tar.gz" -UseBasicParsing
+          $sha = (Invoke-WebRequest https://downloads.apache.org/httpd/httpd-2.4.71.tar.gz.sha512 -UseBasicParsing).Content.Split(' ')[0]
+          if ((Get-FileHash "$t\httpd.tar.gz" -Algorithm SHA512).Hash -ne $sha) { throw "sha512 mismatch" } else { "sha512 OK" }
+          tar -xzf "$t\httpd.tar.gz" -C $t
+          & C:\vcpkg\vcpkg.exe install apr apr-util pcre2 openssl nghttp2 zlib --triplet x64-windows | Select-Object -Last 5
+          "deps done at $($sw.Elapsed)"
+          $v = "C:\vcpkg\installed\x64-windows"
+          cmake -S "$t\httpd-2.4.71" -B "$t\build" -A x64 `
+            "-DCMAKE_INSTALL_PREFIX=$t\Apache24" "-DCMAKE_PREFIX_PATH=$v" `
+            "-DAPR_INCLUDE_DIR=$v\include" "-DAPR_LIBRARIES=$v\lib\libapr-1.lib;$v\lib\libaprutil-1.lib" `
+            "-DPCRE_INCLUDE_DIR=$v\include" "-DPCRE_LIBRARIES=$v\lib\pcre2-8.lib" `
+            "-DOPENSSL_ROOT_DIR=$v" "-DNGHTTP2_INCLUDE_DIR=$v\include" "-DNGHTTP2_LIBRARIES=$v\lib\nghttp2.lib" `
+            "-DENABLE_MODULES=i"
+          if ($LASTEXITCODE) { throw "cmake configure failed" }
+          cmake --build "$t\build" --config Release --target install -- /m /v:minimal
+          if ($LASTEXITCODE) { throw "build failed" }
+          "build done at $($sw.Elapsed)"
+          Copy-Item "$v\bin\*.dll" "$t\Apache24\bin\"
+          & "$t\Apache24\bin\httpd.exe" -V | Select-Object -First 8
+          Get-ChildItem "$t\Apache24\modules" | Measure-Object | ForEach-Object { "modules: $($_.Count)" }
