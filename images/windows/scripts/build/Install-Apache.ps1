@@ -1,7 +1,7 @@
 ################################################################################
 ##  File:  Install-Apache.ps1
 ##  Desc:  Install Apache HTTP Server
-##  Supply chain security: Apache - checksum validation
+##  Supply chain security: Apache Lounge - checksum validation
 ################################################################################
 
 # Stop w3svc service
@@ -10,13 +10,42 @@ if ($w3svcService) {
     Stop-Service $w3svcService
 }
 
-# Apache Lounge build pinned in the toolset (the chocolatey package is no longer updated).
-# apachelounge.com blocks PowerShell downloads, so the verified archive is served from a mirror.
-$apacheToolset = (Get-ToolsetContent).apache
-$archivePath = Invoke-DownloadWithRetry $apacheToolset.url
+# Install the latest Apache Lounge Win64 build (the chocolatey package is no longer updated).
+# apachelounge.com rejects PowerShell web requests, so curl.exe is used for downloads.
+function Invoke-CurlDownload {
+    param (
+        [Parameter(Mandatory)] [string] $Url,
+        [Parameter(Mandatory)] [string] $Path
+    )
+    Write-Host "Downloading $Url to $Path..."
+    curl.exe --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 10 --output $Path $Url
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to download $Url (curl exit code $LASTEXITCODE)"
+    }
+    return $Path
+}
+
+$baseUrl = "https://www.apachelounge.com"
+$downloadPage = Get-Content (Invoke-CurlDownload -Url "$baseUrl/download/" -Path (Join-Path $env:TEMP_DIR "apachelounge.html")) -Raw
+$archiveRelativeUrl = [regex]::Matches($downloadPage, 'href="(?<url>/download/VS\d+/binaries/httpd-2\.4\.\d+-\d+-Win64-VS\d+\.zip)"') |
+    ForEach-Object { $_.Groups["url"].Value } |
+    Select-Object -First 1
+if (-not $archiveRelativeUrl) {
+    throw "Unable to find Apache Win64 archive on $baseUrl/download/"
+}
+$archiveUrl = "$baseUrl$archiveRelativeUrl"
+$archiveName = Split-Path $archiveUrl -Leaf
+$archivePath = Invoke-CurlDownload -Url $archiveUrl -Path (Join-Path $env:TEMP_DIR $archiveName)
 
 #region Supply chain security
-Test-FileChecksum $archivePath -ExpectedSHA256Sum $apacheToolset.checksum
+# Checksum file lists "SHA256-Checksum for: <file>:" followed by the hash on the next line
+$checksumFile = Get-Content (Invoke-CurlDownload -Url "$archiveUrl.txt" -Path (Join-Path $env:TEMP_DIR "$archiveName.txt"))
+$checksumLine = $checksumFile | Select-String -Pattern "SHA256-Checksum for: $([regex]::Escape($archiveName))" -Context 0, 1
+$externalHash = $checksumLine.Context.PostContext | Select-String -Pattern "[A-Fa-f0-9]{64}" | ForEach-Object { $_.Matches.Value }
+if (-not $externalHash) {
+    throw "Unable to find SHA256 checksum for $archiveName"
+}
+Test-FileChecksum $archivePath -ExpectedSHA256Sum $externalHash
 #endregion
 
 # Extract to C:\tools\Apache24
