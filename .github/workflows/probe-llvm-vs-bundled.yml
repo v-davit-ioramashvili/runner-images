@@ -7,54 +7,51 @@ on:
       - 'validate/llvm-vs-bundled*'
 
 jobs:
-  probe:
+  layout:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025, windows-2025-vs2026, windows-11-vs2026-arm]
+        os: [windows-2025-vs2026, windows-11-vs2026-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Versions and tool sets
+      - name: Layout of standalone vs VS bundle
         shell: pwsh
         run: |
-          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-          $vsArchDir = if ($arch -eq "arm64") { "ARM64" } else { "x64" }
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -format json | ConvertFrom-Json
-          Write-Host "VS: $($vs.displayName) $($vs.catalog.productDisplayVersion) at $($vs.installationPath)"
-          $msvc = Get-Content (Join-Path $vs.installationPath "VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt")
-          Write-Host "MSVC tools: $msvc"
-          $stl = Join-Path $vs.installationPath "VC\Tools\MSVC\$msvc\include\yvals_core.h"
-          Write-Host "STL clang requirement:"; Select-String -Path $stl -Pattern "Clang [0-9]+ or newer|__clang_major__ <" | ForEach-Object { "  " + $_.Line.Trim() }
-
-          $standalone = Join-Path $env:ProgramFiles "LLVM\bin"
-          $bundled = Join-Path $vs.installationPath "VC\Tools\Llvm\$vsArchDir\bin"
-          foreach ($p in @($standalone, $bundled)) {
-            Write-Host "==== $p"
-            if (-not (Test-Path "$p\clang-cl.exe")) { Write-Host "  no clang-cl here"; continue }
-            Write-Host ("  " + (& "$p\clang-cl.exe" --version | Select-Object -First 1))
-            $exes = Get-ChildItem $p -Filter *.exe | Select-Object -ExpandProperty BaseName
-            Write-Host "  $($exes.Count) exes"
-            Set-Content -Path "$env:RUNNER_TEMP\$((Split-Path (Split-Path $p -Parent) -Leaf)).txt" -Value $exes
+          $vsArchDir = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "ARM64" } else { "x64" }
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $roots = [ordered]@{ standalone = "$env:ProgramFiles\LLVM"; bundled = "$vsPath\VC\Tools\Llvm\$vsArchDir" }
+          foreach ($k in $roots.Keys) {
+            $r = $roots[$k]
+            $size = [math]::Round(((Get-ChildItem $r -Recurse -File | Measure-Object Length -Sum).Sum / 1GB), 2)
+            Write-Host "==== $k $r ($size GB)"
+            Write-Host "  top: $((Get-ChildItem $r | Select-Object -ExpandProperty Name) -join ', ')"
+            Write-Host "  libclang.dll: $(Test-Path "$r\bin\libclang.dll")  lib\libclang.lib: $(Test-Path "$r\lib\libclang.lib")"
+            $rt = Get-ChildItem "$r\lib\clang" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+            Write-Host "  lib\clang\$($rt.Name): $((Get-ChildItem $rt.FullName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) -join ', ')"
+            $win = Get-ChildItem "$($rt.FullName)\lib" -Recurse -File -ErrorAction SilentlyContinue
+            Write-Host "  runtime libs: $($win.Count); asan: $(($win | Where-Object Name -like '*asan*').Count); profile: $(($win | Where-Object Name -like '*profile*').Count); fuzzer: $(($win | Where-Object Name -like '*fuzzer*').Count)"
+            Write-Host "  lib\*.lib count: $((Get-ChildItem "$r\lib" -Filter *.lib -ErrorAction SilentlyContinue).Count)  include\ exists: $(Test-Path "$r\include")"
           }
-          $s = Get-Content "$env:RUNNER_TEMP\LLVM.txt" -ErrorAction SilentlyContinue
-          $b = Get-Content "$env:RUNNER_TEMP\$vsArchDir.txt" -ErrorAction SilentlyContinue
-          if ($s -and $b) {
-            Write-Host "==== in standalone but NOT in VS bundle:"; ($s | Where-Object { $_ -notin $b }) -join ", "
-          }
-          Write-Host "==== clang on PATH: $((Get-Command clang-cl -ErrorAction SilentlyContinue).Source)"
+          Write-Host "==== VS component for clang:"
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property displayName
 
-      - name: Compile MSVC STL program with each clang-cl
+      - name: Upstream availability for the VS major
+        shell: pwsh
+        run: |
+          choco search llvm --exact --all-versions --limit-output 2>$null | Select-String "^llvm\|2[0-9]\." | Select-Object -Last 8
+          $rel = Invoke-RestMethod "https://api.github.com/repos/llvm/llvm-project/releases?per_page=30" -Headers @{ "User-Agent" = "probe" }
+          $rel | Where-Object { $_.tag_name -match '^llvmorg-22\.' } | ForEach-Object { "$($_.tag_name) aarch64-win: $([bool]($_.assets.name -match 'aarch64-pc-windows-msvc')) win64.exe: $([bool]($_.assets.name -match 'win64\.exe$'))" }
+
+      - name: Rust bindgen style lookup and ASan with bundled clang
         shell: pwsh
         run: |
           $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
           $vsArchDir = if ($arch -eq "arm64") { "ARM64" } else { "x64" }
           $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
           $devCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
-          $src = Join-Path $env:RUNNER_TEMP "atomic.cpp"
-          "#include <atomic>`n#include <string>`n#include <vector>`nint main(){ std::atomic<int> v{41}; std::vector<std::string> s{`"a`"}; return v.fetch_add(1)==41 && s.size()==1 ? 0 : 1; }" | Set-Content $src -Encoding ascii
-          foreach ($cl in @("$env:ProgramFiles\LLVM\bin\clang-cl.exe", "$vsPath\VC\Tools\Llvm\$vsArchDir\bin\clang-cl.exe")) {
-            if (-not (Test-Path $cl)) { continue }
-            $exe = Join-Path $env:RUNNER_TEMP ("t" + [guid]::NewGuid().ToString("N").Substring(0,6) + ".exe")
-            cmd /c "call `"$devCmd`" -no_logo -arch=$arch -host_arch=$arch && `"$cl`" /nologo /EHsc /std:c++20 `"$src`" /Fe`"$exe`" && `"$exe`"" 2>&1 | Select-Object -Last 4
-            Write-Host "RESULT $cl -> exit $LASTEXITCODE"
-          }
+          $cl = "$vsPath\VC\Tools\Llvm\$vsArchDir\bin\clang-cl.exe"
+          $src = Join-Path $env:RUNNER_TEMP "a.cpp"
+          "#include <vector>`nint main(){ std::vector<int> v(3); return v[1]; }" | Set-Content $src -Encoding ascii
+          $exe = Join-Path $env:RUNNER_TEMP "asan.exe"
+          cmd /c "call `"$devCmd`" -no_logo -arch=$arch -host_arch=$arch && `"$cl`" /nologo /EHsc -fsanitize=address `"$src`" /Fe`"$exe`" && `"$exe`"" 2>&1 | Select-Object -Last 5
+          Write-Host "RESULT bundled clang-cl ASan -> exit $LASTEXITCODE"
