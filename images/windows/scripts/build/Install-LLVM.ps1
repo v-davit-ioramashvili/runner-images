@@ -3,10 +3,21 @@
 ##  Desc:  Install the stable version of llvm and clang compilers
 ################################################################################
 
-$llvmVersion = (Get-ToolsetContent).llvm.version
+$llvmToolset = (Get-ToolsetContent).llvm
+$installDir = "C:\Program Files\LLVM"
 
-if (Test-IsArm64) {
-    $installDir = "C:\Program Files\LLVM"
+if ($llvmToolset.useVisualStudioClang) {
+    # Use the Clang that ships with Visual Studio instead of a separate LLVM install:
+    # it is updated together with Visual Studio and always matches the MSVC STL.
+    # Keep the usual LLVM path working by linking it to the Visual Studio folder.
+    $vsLlvmPath = Get-VisualStudioLlvmPath
+    Write-Host "Link $installDir to Clang $(Get-VisualStudioClangVersion) from Visual Studio at $vsLlvmPath"
+    New-Item -ItemType Junction -Path $installDir -Target $vsLlvmPath | Out-Null
+
+    Add-MachinePathItem (Join-Path $installDir "bin")
+    Update-Environment
+} elseif (Test-IsArm64) {
+    $llvmVersion = $llvmToolset.version
 
     Write-Host "Resolve LLVM $llvmVersion ARM64 download URL"
     $downloadUrl = Resolve-GithubReleaseAssetUrl `
@@ -29,7 +40,7 @@ if (Test-IsArm64) {
     Add-MachinePathItem (Join-Path $installDir "bin")
     Update-Environment
 } else {
-    $latestChocoVersion = Resolve-ChocoPackageVersion -PackageName "llvm" -TargetVersion $llvmVersion
+    $latestChocoVersion = Resolve-ChocoPackageVersion -PackageName "llvm" -TargetVersion $llvmToolset.version
     Install-ChocoPackage llvm -ArgumentList '--version', $latestChocoVersion
 }
 
