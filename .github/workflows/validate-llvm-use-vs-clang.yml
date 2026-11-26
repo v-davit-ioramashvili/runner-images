@@ -1,0 +1,85 @@
+# TEMPORARY validation for #15367: runs the real Install-LLVM.ps1 and LLVM tests from this branch on hosted runners.
+# Delete this file before opening the PR.
+name: Validate LLVM uses Visual Studio Clang
+
+on:
+  push:
+    branches:
+      - 'validate/llvm-use-vs-clang*'
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025-vs2026, toolset: toolset-2025-vs2026.json, case: use-vs-clang }
+          - { os: windows-11-vs2026-arm, toolset: toolset-win-11-vs2026-arm64.json, case: use-vs-clang }
+          - { os: windows-2022, toolset: toolset-2022.json, case: pinned }
+          - { os: windows-2025-vs2026, toolset: toolset-2025-vs2026.json, case: standalone-22-baseline }
+    name: ${{ matrix.os }} (${{ matrix.case }})
+    runs-on: ${{ matrix.os }}
+    env:
+      IMAGE_FOLDER: ${{ github.workspace }}\image
+      TEMP_DIR: ${{ github.workspace }}\temp
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Stage toolset, helpers and tests like the image build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path $env:IMAGE_FOLDER, $env:TEMP_DIR, C:\image\tests -Force | Out-Null
+          $toolset = Get-Content ".\images\windows\toolsets\${{ matrix.toolset }}" -Raw | ConvertFrom-Json
+          if ("${{ matrix.case }}" -eq "standalone-22-baseline") {
+            $toolset.llvm = [pscustomobject]@{ version = "22" }
+          }
+          $toolset | ConvertTo-Json -Depth 100 | Set-Content "$env:IMAGE_FOLDER\toolset.json" -Encoding utf8
+          Write-Host "Staged llvm entry: $(($toolset.llvm | ConvertTo-Json -Compress))"
+          Copy-Item .\images\windows\scripts\tests\*.ps1 C:\image\tests -Force
+
+      - name: Remove the LLVM the runner ships, to mirror a clean build
+        shell: pwsh
+        run: |
+          if (choco list llvm --exact --limit-output) { choco uninstall llvm -y --no-progress | Select-Object -Last 3 }
+          if (Test-Path "C:\Program Files\LLVM") { Remove-Item "C:\Program Files\LLVM" -Recurse -Force }
+          Write-Host "C:\Program Files\LLVM exists: $(Test-Path 'C:\Program Files\LLVM')"
+
+      - name: Run Install-LLVM.ps1 in Windows PowerShell, as packer does (includes the LLVM Pester tests)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+          Write-Host "PowerShell $($PSVersionTable.PSVersion); VS Clang: $(Get-VisualStudioClangVersion)"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          . .\images\windows\scripts\build\Install-LLVM.ps1
+          Write-Host "Install-LLVM.ps1 took $([int]$sw.Elapsed.TotalSeconds) s"
+
+      - name: Check the result
+        shell: pwsh
+        run: |
+          $item = Get-Item "C:\Program Files\LLVM"
+          Write-Host "C:\Program Files\LLVM: LinkType=$($item.LinkType) Target=$($item.Target)"
+          Write-Host "clang on PATH (new shell): $((Get-Command clang-cl).Source)"
+          Write-Host "$(clang --version | Select-Object -First 1)"
+          Write-Host "libclang.dll present: $(Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')"
+          $real = if ($item.LinkType) { 0 } else { [math]::Round(((Get-ChildItem $item.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1GB), 2) }
+          Write-Host "Disk used by C:\Program Files\LLVM itself: $real GB"
+
+      - name: ASan program with C:\Program Files\LLVM clang-cl (informational)
+        if: runner.arch == 'X64'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $devCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+          $src = Join-Path $env:RUNNER_TEMP "asan.cpp"
+          "#include <vector>`n#include <cstdio>`nint main(){ std::vector<int> v(3); std::printf(`"asan-ok %d\n`", v[1]); return 0; }" | Set-Content $src -Encoding ascii
+          foreach ($variant in @("dynamic", "static-runtime")) {
+            $exe = Join-Path $env:RUNNER_TEMP "asan-$variant.exe"
+            $flags = if ($variant -eq "static-runtime") { "/MT" } else { "/MD" }
+            cmd /c "call `"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && `"C:\Program Files\LLVM\bin\clang-cl.exe`" /nologo /EHsc $flags -fsanitize=address `"$src`" /Fe`"$exe`" && where clang_rt.asan_dynamic-x86_64.dll && `"$exe`"" 2>&1 | Select-Object -Last 6
+            Write-Host "RESULT asan $variant -> exit $LASTEXITCODE"
+          }
