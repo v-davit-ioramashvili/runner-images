@@ -294,7 +294,7 @@
         "version": "7.0"
     },
     "llvm": {
-        "version": "20"
+        "matchVisualStudio": true
     },
     "php": {
         "version": "8.5"

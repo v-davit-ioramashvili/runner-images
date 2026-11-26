@@ -145,6 +145,31 @@ function Get-VisualStudioInstance {
     $vsInstance | Select-VSSetupInstance -Product *
 }
 
+function Get-VisualStudioClangVersion {
+    <#
+    .SYNOPSIS
+        Returns the version of the Clang that ships with Visual Studio.
+
+    .DESCRIPTION
+        Reads the version of clang.exe installed by the Visual Studio
+        "C++ Clang Compiler for Windows" component for the current architecture.
+        The MSVC STL in the same Visual Studio release requires at least this Clang major version.
+    #>
+
+    $architecture = if (Test-IsArm64) { "ARM64" } else { "x64" }
+    $clangPath = Join-Path (Get-VisualStudioInstance).InstallationPath "VC\Tools\Llvm\$architecture\bin\clang.exe"
+    if (-not (Test-Path $clangPath)) {
+        throw "Clang from Visual Studio is not found at $clangPath"
+    }
+
+    $versionLine = & $clangPath --version | Select-Object -First 1
+    if ($versionLine -notmatch 'clang version (\d+\.\d+\.\d+)') {
+        throw "Unable to parse the Clang version from '$versionLine'"
+    }
+
+    return [version] $Matches[1]
+}
+
 function Get-VisualStudioComponents {
     <#
     .SYNOPSIS

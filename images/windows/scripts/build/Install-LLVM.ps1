@@ -3,18 +3,29 @@
 ##  Desc:  Install the stable version of llvm and clang compilers
 ################################################################################
 
-$llvmVersion = (Get-ToolsetContent).llvm.version
+$llvmToolset = (Get-ToolsetContent).llvm
+
+if ($llvmToolset.matchVisualStudio) {
+    # The MSVC STL requires the Clang major version that ships with the same Visual Studio release,
+    # so install the latest LLVM release of that major version
+    $vsClangVersion = Get-VisualStudioClangVersion
+    $llvmVersion = "$($vsClangVersion.Major)"
+    Write-Host "Visual Studio ships Clang $vsClangVersion, installing the latest LLVM $llvmVersion release"
+} else {
+    $llvmVersion = $llvmToolset.version
+}
 
 if (Test-IsArm64) {
     $installDir = "C:\Program Files\LLVM"
+    $releaseVersion = if ($llvmToolset.matchVisualStudio) { "$llvmVersion.*" } else { $llvmVersion }
 
-    Write-Host "Resolve LLVM $llvmVersion ARM64 download URL"
+    Write-Host "Resolve LLVM $releaseVersion ARM64 download URL"
     $downloadUrl = Resolve-GithubReleaseAssetUrl `
         -Repository "llvm/llvm-project" `
-        -Version $llvmVersion `
+        -Version $releaseVersion `
         -UrlMatchPattern "clang*llvm-*-aarch64-pc-windows-msvc.tar.xz"
 
-    Write-Host "Download LLVM $llvmVersion ARM64 archive"
+    Write-Host "Download LLVM $releaseVersion ARM64 archive"
     $archivePath = Invoke-DownloadWithRetry $downloadUrl
 
     Write-Host "Extract LLVM archive"
@@ -30,6 +41,9 @@ if (Test-IsArm64) {
     Update-Environment
 } else {
     $latestChocoVersion = Resolve-ChocoPackageVersion -PackageName "llvm" -TargetVersion $llvmVersion
+    if (-not $latestChocoVersion) {
+        throw "LLVM $llvmVersion is not available on Chocolatey"
+    }
     Install-ChocoPackage llvm -ArgumentList '--version', $latestChocoVersion
 }
 

@@ -55,6 +55,7 @@ Export-ModuleMember -Function @(
 Export-ModuleMember -Function @(
     'Install-VisualStudio'
     'Get-VisualStudioInstance'
+    'Get-VisualStudioClangVersion'
     'Get-VisualStudioComponents'
     'Get-VsixInfoFromMarketplace'
     'Install-VSIXFromFile'
