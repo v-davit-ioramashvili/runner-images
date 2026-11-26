@@ -1,0 +1,73 @@
+# TEMPORARY validation for #15367: runs the real Install-LLVM.ps1 and LLVM tests from this branch on hosted runners.
+# Delete this file before opening the PR.
+name: Validate LLVM follows Visual Studio
+
+on:
+  push:
+    branches:
+      - 'validate/llvm-follow-vs*'
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025-vs2026, toolset: toolset-2025-vs2026.json, case: follow-vs }
+          - { os: windows-11-vs2026-arm, toolset: toolset-win-11-vs2026-arm64.json, case: follow-vs }
+          - { os: windows-2022, toolset: toolset-2022.json, case: pinned }
+          - { os: windows-2025-vs2026, toolset: toolset-2025-vs2026.json, case: stale-pin-must-fail }
+    name: ${{ matrix.os }} (${{ matrix.case }})
+    runs-on: ${{ matrix.os }}
+    env:
+      IMAGE_FOLDER: ${{ github.workspace }}\image
+      TEMP_DIR: ${{ github.workspace }}\temp
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Stage toolset, helpers and tests like the image build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path $env:IMAGE_FOLDER, $env:TEMP_DIR, C:\image\tests -Force | Out-Null
+          $toolset = Get-Content ".\images\windows\toolsets\${{ matrix.toolset }}" -Raw | ConvertFrom-Json
+          if ("${{ matrix.case }}" -eq "stale-pin-must-fail") {
+            # the toolset as it is on main today: standalone LLVM pinned to 20
+            $toolset.llvm = [pscustomobject]@{ version = "20" }
+          }
+          $toolset | ConvertTo-Json -Depth 100 | Set-Content "$env:IMAGE_FOLDER\toolset.json" -Encoding utf8
+          Write-Host "Staged llvm entry: $(($toolset.llvm | ConvertTo-Json -Compress))"
+          Copy-Item .\images\windows\scripts\tests\*.ps1 C:\image\tests -Force
+
+      - name: Remove the LLVM the runner ships, to mirror a clean build
+        shell: pwsh
+        run: |
+          if (choco list llvm --exact --limit-output) { choco uninstall llvm -y --no-progress | Select-Object -Last 3 }
+          if (Test-Path "C:\Program Files\LLVM") { Remove-Item "C:\Program Files\LLVM" -Recurse -Force }
+          Write-Host "C:\Program Files\LLVM exists: $(Test-Path 'C:\Program Files\LLVM')"
+
+      - name: Run Install-LLVM.ps1 (includes the LLVM Pester tests)
+        id: install
+        continue-on-error: ${{ matrix.case == 'stale-pin-must-fail' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module Pester -Force
+          Import-Module .\images\windows\scripts\helpers\ImageHelpers.psd1 -Force -DisableNameChecking
+          Import-Module .\images\windows\scripts\tests\Helpers.psm1 -Force -DisableNameChecking
+          Write-Host "VS Clang: $(Get-VisualStudioClangVersion)"
+          . .\images\windows\scripts\build\Install-LLVM.ps1
+
+      - name: Check the outcome
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "ARM64" } else { "x64" }
+          Write-Host "Standalone: $(& "$env:ProgramFiles\LLVM\bin\clang.exe" --version | Select-Object -First 1)"
+          Write-Host "VS bundle:  $(& "$vsPath\VC\Tools\Llvm\$arch\bin\clang.exe" --version | Select-Object -First 1)"
+          Write-Host "clang on machine PATH: $([Environment]::GetEnvironmentVariable('PATH','Machine') -match [regex]::Escape('C:\Program Files\LLVM\bin'))"
+          Write-Host "Install step outcome: ${{ steps.install.outcome }}"
+          if ("${{ matrix.case }}" -eq "stale-pin-must-fail") {
+            if ("${{ steps.install.outcome }}" -ne "failure") { throw "The stale LLVM 20 pin passed the tests, so the regression test does not catch #15367" }
+            Write-Host "OK - the stale LLVM 20 pin is rejected by the tests"
+          }
