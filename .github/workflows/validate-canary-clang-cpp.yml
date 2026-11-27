@@ -1,4 +1,4 @@
-# TEMPORARY: validates a Windows C++ step for the clang canary test (#15367).
+# TEMPORARY: runs the proposed clang canary action (with the new C++ step) on every hosted image (#15367).
 name: Validate clang canary C++ step
 
 on:
@@ -11,38 +11,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025, windows-2025-vs2026, windows-11-arm, windows-11-vs2026-arm]
+        os: [windows-2022, windows-2025, windows-2025-vs2026, windows-11-arm, windows-11-vs2026-arm, ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, macos-15, macos-26]
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-
       - name: Versions
         shell: bash
-        run: |
-          clang --version | head -1
-          echo "ImageVersion=$ImageVersion"
-
-      - name: Existing canary C step, unchanged
-        id: c
-        continue-on-error: true
-        shell: bash
-        working-directory: canary-clang
-        run: |
-          clang -v -c -Wall check_prime.c -o check_prime.o
-          clang -v check_prime.o -o check_prime
-          ls check_prime*
-          echo "113" | ./check_prime
-
-      - name: New C++ step with the MSVC STL
-        id: cpp
-        continue-on-error: true
-        shell: bash
-        working-directory: canary-clang
-        run: |
-          clang++ -std=c++20 -Wall main.cpp -o main.exe
-          ./main.exe
-
-      - name: Result
-        shell: bash
-        run: echo "RESULT ${{ matrix.os }} c=${{ steps.c.outcome }} cpp=${{ steps.cpp.outcome }}"
+        run: clang --version | head -1; clang++ --version | head -1; echo "ImageVersion=$ImageVersion"
+      - name: Proposed clang canary action
+        uses: ./.github/actions/clang

@@ -1,0 +1,19 @@
+name: Create and expand 7z archive
+description: Create and expand 7z archive
+runs:
+  using: composite
+  steps:
+    - name: Build sample
+      shell: bash
+      working-directory: src/clang/sample
+      run: |
+        clang -v -c -Wall check_prime.c -o check_prime.o
+        clang -v check_prime.o -o check_prime
+        echo "113" | ./check_prime
+
+    - name: Build C++ sample
+      shell: bash
+      working-directory: src/clang/sample
+      run: |
+        clang++ -std=c++20 -Wall main.cpp -o main.exe
+        ./main.exe
